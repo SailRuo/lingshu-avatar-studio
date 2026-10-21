@@ -1,0 +1,14 @@
+node_modules
+dist
+.DS_Store
+*.local
+public/models/*.onnx
+public/models/*.task
+public/models/*.tflite
+public/mediapipe
+tests/e2e/.artifacts
+release
+landing/downloads/*.dmg
+landing/downloads/*.zip
+src-tauri/target/
+src-tauri/gen/

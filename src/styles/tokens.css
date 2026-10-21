@@ -1,0 +1,33 @@
+:root {
+  color-scheme: dark;
+  --av-bg: #0a0e15;
+  --av-bg-soft: #0e1420;
+  --av-panel: rgba(18, 25, 38, 0.78);
+  --av-panel-solid: #121926;
+  --av-panel-raised: rgba(26, 35, 52, 0.86);
+  --av-border: rgba(255, 255, 255, 0.09);
+  --av-border-strong: rgba(255, 255, 255, 0.16);
+  --av-text: #edf2f8;
+  --av-text-soft: #c2ccda;
+  --av-muted: #8b98aa;
+  --av-faint: #5d6a7c;
+  --av-accent: #e0a45c;
+  --av-accent-strong: #f2bd79;
+  --av-accent-soft: rgba(224, 164, 92, 0.14);
+  --av-cool: #7dd3fc;
+  --av-cool-soft: rgba(125, 211, 252, 0.12);
+  --av-success: #5eead4;
+  --av-success-soft: rgba(94, 234, 212, 0.12);
+  --av-danger: #fb7185;
+  --av-danger-soft: rgba(251, 113, 133, 0.12);
+  --av-warning: #fbbf24;
+  --av-radius-xs: 8px;
+  --av-radius-sm: 12px;
+  --av-radius: 18px;
+  --av-radius-lg: 26px;
+  --av-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+  --av-shadow-soft: 0 12px 34px rgba(0, 0, 0, 0.22);
+  --av-font-sans: "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --av-font-serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", serif;
+  --av-max: 1240px;
+}

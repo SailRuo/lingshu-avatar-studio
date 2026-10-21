@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Avatar Studio 是一款本地运行的 2D 数字人创建与聊天桌面应用：用自己的生图模型和多模态模型生成角色，自动分层绑定，支持语音与口型。"
+    />
+    <title>Avatar Studio · 把设定变成会呼吸的数字人</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <a class="brand" href="#top" aria-label="Avatar Studio">
+        <span class="brand-mark" aria-hidden="true"><span class="brand-eyes"></span></span>
+        <span class="brand-text">
+          <strong>Avatar Studio</strong>
+          <small>2D 数字人工作室</small>
+        </span>
+      </a>
+      <nav class="nav-links" aria-label="页面导航">
+        <a href="#features">功能</a>
+        <a href="#why-desktop">为什么是桌面端</a>
+        <a href="#download">下载</a>
+      </nav>
+      <a class="nav-download" href="#download">下载 macOS 版</a>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="kicker">Desktop app · macOS first</p>
+          <h1>把一张设定，<br />变成会呼吸的数字人。</h1>
+          <p class="lede">
+            接上你自己的生图模型和多模态模型。生成正面立绘，自动拆分图层、绑定表情与口型，
+            然后和 TA 说话。没有账号，没有服务器，也没有需要你维护的代理。
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="./downloads/Avatar-Studio-0.1.0-arm64.dmg" download>
+              下载 macOS 版
+            </a>
+            <a class="button secondary" href="#features">查看功能</a>
+          </div>
+          <p class="fine-print">Apple Silicon · 未签名开发版 · Windows 版准备中</p>
+          <div class="hero-notes">
+            <span>BYOK · 本机密钥</span>
+            <span>自动分层与绑定</span>
+            <span>不是 Live2D，不生成 .moc3</span>
+          </div>
+        </div>
+        <div class="hero-art" aria-hidden="true">
+          <span class="orbit orbit-one"></span>
+          <span class="orbit orbit-two"></span>
+          <div class="hero-frame">
+            <img src="./brand/hero-character.png" alt="" />
+            <span class="hero-vignette"></span>
+          </div>
+          <span class="hero-caption">LIVE LAYERS / 2.5D</span>
+        </div>
+      </section>
+
+      <section class="principles" aria-label="产品原则">
+        <article>
+          <span class="principle-index">01</span>
+          <h2>没有服务器</h2>
+          <p>模型请求由你的电脑直接发出；角色包、人设和聊天都留在本机。</p>
+        </article>
+        <article>
+          <span class="principle-index">02</span>
+          <h2>没有代理</h2>
+          <p>桌面端走原生网络层，不受浏览器 CORS 限制；商汤等接口可以直接用。</p>
+        </article>
+        <article>
+          <span class="principle-index">03</span>
+          <h2>没有账号</h2>
+          <p>下载、打开、填自己的 Key 就能用。不需要注册，也不会上传作品。</p>
+        </article>
+      </section>
+
+      <section id="features" class="section">
+        <div class="section-head">
+          <div>
+            <p class="kicker">What it does</p>
+            <h2>从设定到会说话的角色，都在一个窗口里。</h2>
+          </div>
+          <p class="section-lede">
+            不是把一堆模型 API 拼在一起，而是把“生成、分层、绑定、聊天、语音、导出”串成一条能反复使用的创作流程。
+          </p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="feature-index">01 / 模型</span>
+            <h3>你自己的模型</h3>
+            <p>生图模型、多模态模型、语音模型都可以自带 Key；支持 OpenAI 兼容接口和常用国内服务商，模型列表自动获取。</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">02 / 智能体</span>
+            <h3>一个模型，既看图也聊天</h3>
+            <p>不再区分“视觉模型”和“对话模型”。同一个多模态模型负责分析立绘、规划图层，也负责舞台上的对话。</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">03 / 绑定</span>
+            <h3>自动分层，自动绑骨</h3>
+            <p>识别人脸、头发、眼睛和嘴，拆成图层，生成枢轴、视差和参数绑定。目标档位是完整分层，失败时自动降级。</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">04 / 声音</span>
+            <h3>会眨眼，也会开口</h3>
+            <p>待机呼吸、轻微摆动、随机眨眼；TTS 音频驱动口型。可以试听，也可以随时停下。</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">05 / 角色包</span>
+            <h3>带走你的角色</h3>
+            <p>导出 ZIP 角色包，换设备导入；也可以导出分层 PSD，继续在 Cubism Editor 里手工加工。</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">06 / 本地</span>
+            <h3>默认本地优先</h3>
+            <p>密钥在 macOS 安全存储，角色在本地数据库。没有云端账号，也没有悄悄上传。</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="why-desktop" class="why-desktop">
+        <div class="why-copy">
+          <p class="kicker">Why desktop</p>
+          <h2>网页能做展示，但做不了真正的创作工具。</h2>
+          <p>
+            浏览器会拦截商汤日日新这类接口的跨域预检。要绕过去，要么让用户自己起一个本地代理，要么让你替用户转发请求——
+            前者难用，后者意味着你要承担带宽和用户的 Key。我们都不选。
+          </p>
+          <p>
+            桌面客户端直接用本机网络层请求模型，没有 CORS 这道墙；密钥只在本机，请求不经过任何服务器。
+            所以真正干活的版本是桌面端，网页只负责介绍和下载。
+          </p>
+          <a class="text-link" href="#download">下载桌面端 <span>→</span></a>
+        </div>
+        <div class="why-diagram" aria-label="本地请求示意">
+          <div class="diagram-node">
+            <span class="diagram-label">AVATAR STUDIO</span>
+            <strong>桌面客户端</strong>
+            <small>角色 · 分层 · 绑定 · 对话</small>
+          </div>
+          <span class="diagram-line"><i></i></span>
+          <div class="diagram-node remote">
+            <span class="diagram-label">YOUR KEY</span>
+            <strong>模型服务商</strong>
+            <small>生图 · 多模态 · 语音</small>
+          </div>
+          <span class="diagram-note">本机 → 服务商，直连</span>
+        </div>
+      </section>
+
+      <section id="download" class="download-section">
+        <div class="download-card">
+          <div>
+            <p class="kicker">Download</p>
+            <h2>在 Mac 上开始。</h2>
+            <p class="download-copy">
+              下载 Apple Silicon 版本，解压后拖进“应用程序”。首次打开如遇 Gatekeeper，请右键选择“打开”。
+            </p>
+            <div class="download-actions">
+              <a class="button primary" href="./downloads/Avatar-Studio-0.1.0-arm64.dmg" download>
+                下载 macOS 版
+              </a>
+              <span class="coming">Windows 版准备中</span>
+            </div>
+          </div>
+          <div class="download-meta">
+            <span>macOS · Apple Silicon</span>
+            <span>本地运行 · 无账号</span>
+            <span>BYOK · 自带模型 Key</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="limits">
+        <div>
+          <p class="kicker">One honest note</p>
+          <h2>它是自研 2.5D 角色包，不是 Live2D `.moc3`。</h2>
+        </div>
+        <p>
+          Live2D 的 `.moc3` 只能由 Cubism Editor 导出，网页和 AI 都没法一键生成。这里用的是我们自己的分层、网格和参数格式，
+          能在应用里转头、眨眼、说话；导出 PSD 后，你可以继续在 Cubism Editor 里手工绑定成真正的 Live2D 模型。
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <span>Avatar Studio · 本地 2D 数字人工作室</span>
+      <span>没有账号 · 没有云同步 · 没有服务器代理</span>
+    </footer>
+  </body>
+</html>

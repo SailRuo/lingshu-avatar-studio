@@ -1,0 +1,326 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+html {
+  background: var(--av-bg);
+}
+
+body {
+  margin: 0;
+  color: var(--av-text);
+  font-family: var(--av-font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+  background:
+    radial-gradient(circle at 16% 4%, rgba(224, 164, 92, 0.13), transparent 34%),
+    radial-gradient(circle at 86% 0%, rgba(125, 211, 252, 0.09), transparent 30%),
+    radial-gradient(circle at 50% 110%, rgba(94, 234, 212, 0.05), transparent 42%),
+    linear-gradient(180deg, #090d14 0%, #0b101a 48%, #080b11 100%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.22;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(circle at 50% 25%, black, transparent 78%);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+img {
+  max-width: 100%;
+  display: block;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+::selection {
+  background: rgba(224, 164, 92, 0.3);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.av-shell {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.av-main {
+  width: min(var(--av-max), calc(100% - 48px));
+  margin: 0 auto;
+  padding: 36px 0 80px;
+  flex: 1;
+}
+
+.av-card {
+  border: 1px solid var(--av-border);
+  border-radius: var(--av-radius);
+  background: var(--av-panel);
+  box-shadow: var(--av-shadow-soft);
+  backdrop-filter: blur(18px);
+}
+
+.av-card-soft {
+  border: 1px solid var(--av-border);
+  border-radius: var(--av-radius-sm);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.av-kicker {
+  color: var(--av-accent);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.av-title {
+  font-family: var(--av-font-serif);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+.av-muted {
+  color: var(--av-muted);
+}
+
+.av-mono {
+  font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+.av-input,
+.av-select,
+.av-textarea {
+  width: 100%;
+  border: 1px solid var(--av-border);
+  border-radius: 12px;
+  background: rgba(5, 9, 15, 0.55);
+  color: var(--av-text);
+  padding: 11px 13px;
+  outline: none;
+  transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+
+.av-input::placeholder,
+.av-textarea::placeholder {
+  color: var(--av-faint);
+}
+
+.av-input:focus,
+.av-select:focus,
+.av-textarea:focus {
+  border-color: rgba(224, 164, 92, 0.6);
+  box-shadow: 0 0 0 3px rgba(224, 164, 92, 0.12);
+  background: rgba(5, 9, 15, 0.8);
+}
+
+.av-textarea {
+  min-height: 104px;
+  resize: vertical;
+}
+
+.av-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--av-text-soft);
+  margin-bottom: 7px;
+}
+
+.av-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  border: 1px solid var(--av-border-strong);
+  color: var(--av-muted);
+  font-size: 11px;
+  margin-left: 6px;
+  padding: 0;
+  background: transparent;
+}
+
+.av-help:hover {
+  color: var(--av-accent);
+  border-color: rgba(224, 164, 92, 0.4);
+}
+
+.av-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--av-border);
+  font-size: 11px;
+  color: var(--av-text-soft);
+  background: rgba(255, 255, 255, 0.035);
+  white-space: nowrap;
+}
+
+.av-pill.is-ok {
+  color: var(--av-success);
+  background: var(--av-success-soft);
+  border-color: rgba(94, 234, 212, 0.18);
+}
+
+.av-pill.is-warn {
+  color: var(--av-warning);
+  background: rgba(251, 191, 36, 0.1);
+  border-color: rgba(251, 191, 36, 0.2);
+}
+
+.av-pill.is-error {
+  color: var(--av-danger);
+  background: var(--av-danger-soft);
+  border-color: rgba(251, 113, 133, 0.2);
+}
+
+.av-divider {
+  height: 1px;
+  background: var(--av-border);
+  border: 0;
+  margin: 20px 0;
+}
+
+.av-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.av-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.av-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.av-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.av-scroll {
+  overflow: auto;
+}
+
+.av-link {
+  color: var(--av-accent);
+  border-bottom: 1px solid transparent;
+}
+
+.av-link:hover {
+  border-bottom-color: rgba(224, 164, 92, 0.5);
+}
+
+.av-fade-enter-active,
+.av-fade-leave-active {
+  transition: opacity 160ms ease;
+}
+
+.av-fade-enter-from,
+.av-fade-leave-to {
+  opacity: 0;
+}
+
+/*
+ * Draggable window chrome.
+ *
+ * The header carries `data-tauri-drag-region="deep"` (see AppShell.vue):
+ * that attribute is what moves the window, WKWebView ignores
+ * `-webkit-app-region`.
+ */
+
+/* Leave room for the macOS traffic lights in overlay-title-bar mode. */
+body.is-native .shell-inner {
+  padding-left: 84px;
+}
+
+@media (max-width: 900px) {
+  .av-main {
+    width: min(var(--av-max), calc(100% - 28px));
+    padding-top: 22px;
+  }
+
+  .av-grid-2,
+  .av-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}
