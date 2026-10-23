@@ -14,6 +14,8 @@ import type { MeshDef, RigDocument } from '../../types/rig'
 import type { MouthShape } from '../audio/viseme'
 import { loadHtmlImage } from '../imaging/blob'
 import { createClosedEyeTexture, createMouthVariantTextures } from './faceVariants'
+import { LayerVisibility } from './layerVisibility'
+import { deformMouthPositions, type MouthControl, type MouthWeights } from './mouthDeform'
 
 const HEAD_TURN_VERTEX = `
 in vec2 aPosition;
@@ -72,11 +74,31 @@ void main(void) {
   // Only a few pixels of feature parallax: a large slide reads as the whole
   // face being dragged sideways instead of the head turning.
   warped -= turn * 0.05 * (1.0 - x * x);
-  // Fade the warp out at the jaw so the neck stays anchored to the body.
-  float neckWeight = 1.0 - smoothstep(uNeckY - 0.15, uNeckY, uv.y);
+  // Fade the warp out at the chin cut; the neck below it belongs to the body
+  // and stays perfectly still so the two can never separate.
+  float neckWeight = 1.0 - smoothstep(uNeckY - 0.06, uNeckY, uv.y);
   float xp = mix(nx, warped, band * neckWeight);
   uv.x = uCenterX + xp * halfWidth;
   finalColor = texture(uTexture, uv);
+}
+`
+
+const EYE_GAZE_FRAGMENT = `
+in vec2 vTextureCoord;
+out vec4 finalColor;
+
+uniform sampler2D uTexture;
+uniform float uGazeX;
+uniform float uGazeY;
+
+void main(void) {
+  vec2 uv = vTextureCoord;
+  // Only the iris/pupil region moves. The mask fades out before the sclera
+  // and the lash line, so the eye outline stays anchored to the socket.
+  vec2 d = (uv - vec2(0.5, 0.52)) / vec2(0.34, 0.32);
+  float inside = 1.0 - smoothstep(0.55, 1.0, length(d));
+  vec2 shifted = uv - vec2(uGazeX, uGazeY) * inside;
+  finalColor = texture(uTexture, shifted);
 }
 `
 
@@ -118,6 +140,16 @@ interface LayerNode {
   isHair: boolean
 }
 
+/** A mouth layer that is deformed by the continuous mouth field. */
+interface MouthMeshNode {
+  node: LayerNode
+  mesh: Mesh
+  /** The resting positions of the grid vertices, in the layer's own space. */
+  base: Float32Array
+  weights: MouthWeights
+  control: MouthControl
+}
+
 interface MouthOverlays {
   half: Sprite
   open: Sprite
@@ -147,6 +179,11 @@ function blinkCurve(progress: number): number {
   if (progress < 0.08) return smoothstep(progress / 0.08)
   if (progress < 0.6) return 1
   return 1 - smoothstep((progress - 0.6) / 0.4)
+}
+
+/** Moves a point from character space into the space of a layer. */
+function shiftPoint(point: { x: number; y: number }, offset: { x: number; y: number }) {
+  return { x: point.x - offset.x, y: point.y - offset.y }
 }
 
 export async function createStageRuntime(options: StageOptions): Promise<StageHandle> {
@@ -239,22 +276,40 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
   const bodyLayers: LayerNode[] = []
   const headLayers: LayerNode[] = []
   /**
-   * Every layer id maps to the sprites and the animation overlays that
-   * belong to it, so a visibility switch hides the whole piece.
+   * Every layer id maps to the renderables and the animation overlays that
+   * belong to it, so a visibility switch hides the whole piece. The hair is a
+   * mesh rather than a sprite, so it has to be registered just as carefully.
    */
-  const layerParts = new Map<string, { nodes: LayerNode[]; overlays: Sprite[] }>()
+  const visibility = new LayerVisibility()
   const layerVisibility = new Map<string, boolean>()
   let soloLayer: string | null = null
-  const partOf = (id: string) => {
-    let entry = layerParts.get(id)
-    if (!entry) {
-      entry = { nodes: [], overlays: [] }
-      layerParts.set(id, entry)
-    }
-    return entry
-  }
   const eyeOverlays: Array<{ sprite: Sprite; base: Sprite }> = []
   let mouthOverlays: MouthOverlays | null = null
+  const mouthMeshes: MouthMeshNode[] = []
+  let mouthCavityNode: LayerNode | null = null
+  const gazeFilters: Filter[] = []
+
+  // The continuous mouth rig needs the deformation field that was stored in
+  // the character pack. Without it — an older pack, a broken import — the
+  // stage falls back to the five pre-drawn mouth textures.
+  const mouthField = rig.mouth
+  const mouthWeights: MouthWeights | null = mouthField
+    ? {
+        upper: Float32Array.from(mouthField.upper),
+        lower: Float32Array.from(mouthField.lower),
+        corner: Float32Array.from(mouthField.corner),
+        side: Float32Array.from(mouthField.side),
+      }
+    : null
+  const mouthFieldMatches = (def: LayerDef): boolean => {
+    if (!mouthField) return false
+    return (
+      Math.abs(def.offset.x - mouthField.rect.x) < 0.5 &&
+      Math.abs(def.offset.y - mouthField.rect.y) < 0.5 &&
+      Math.abs(def.size.w - mouthField.rect.w) < 0.5 &&
+      Math.abs(def.size.h - mouthField.rect.h) < 0.5
+    )
+  }
 
   for (const def of Object.values(manifest.layers)) {
     if (!def) continue
@@ -280,12 +335,76 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
 
     const isEye = def.id === 'eyeL' || def.id === 'eyeR'
     const isMouth = def.id === 'mouth'
+    const isMouthCavity = def.id === 'mouthCavity'
     const isHair = def.id === 'hairFront' || def.id === 'hairBack'
     const meshDef = isHair ? rig.meshes?.[def.id] : undefined
     // Back hair is stored under the body node, but it belongs to the head:
     // keeping it static leaves a fixed copy behind the moving head, and the
     // head layer is cut at the neckline, so the lower hair would disappear.
     const parentToHead = def.parent !== 'body' || def.id === 'hairBack'
+
+    // The mouth and the cavity behind it are deformed by the continuous mouth
+    // field. Both use the same grid and the same weights, so the edge of the
+    // cavity always follows the lips.
+    // Only the lips deform. The cavity is a fixed picture that the parting
+    // lips reveal: stretching it with the same field smears its contents into
+    // streaks, which is exactly what an open mouth must not look like.
+    if (isMouth && mouthField && mouthWeights && mouthFieldMatches(def)) {
+      try {
+        const geometry = new PlaneGeometry({
+          width: def.size.w,
+          height: def.size.h,
+          verticesX: Math.max(2, mouthField.cols),
+          verticesY: Math.max(2, mouthField.rows),
+        })
+        const mesh = new Mesh({ geometry, texture })
+        mesh.position.set(def.offset.x, def.offset.y)
+        mesh.alpha = def.opacity
+        mesh.zIndex = def.z
+        const node: LayerNode = {
+          def,
+          sprite: null,
+          mesh,
+          basePositions: new Float32Array(geometry.positions),
+          meshDef: null,
+          baseX: def.offset.x,
+          baseY: def.offset.y,
+          isEye: false,
+          isMouth,
+          isHair: false,
+        }
+        layerNodes.push(node)
+        // A mesh that is not registered with its layer can never be hidden.
+        visibility.register(def.id, mesh)
+        // The control points live in character space; the mesh works in its
+        // own space, so they are moved along with the layer.
+        const control: MouthControl = {
+          upper: shiftPoint(mouthField.control.upper, def.offset),
+          lower: shiftPoint(mouthField.control.lower, def.offset),
+          cornerL: shiftPoint(mouthField.control.cornerL, def.offset),
+          cornerR: shiftPoint(mouthField.control.cornerR, def.offset),
+          innerUpper: shiftPoint(mouthField.control.innerUpper, def.offset),
+          innerLower: shiftPoint(mouthField.control.innerLower, def.offset),
+        }
+        mouthMeshes.push({
+          node,
+          mesh,
+          base: node.basePositions!,
+          weights: mouthWeights,
+          control,
+        })
+        if (parentToHead) {
+          headLayers.push(node)
+          headGroup.addChild(mesh)
+        } else {
+          bodyLayers.push(node)
+          bodyGroup.addChild(mesh)
+        }
+        continue
+      } catch (err) {
+        console.warn('[avatar] mouth mesh failed, falling back to sprites', def.id, err)
+      }
+    }
 
     if (isHair && meshDef) {
       try {
@@ -312,6 +431,10 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
           isHair: true,
         }
         layerNodes.push(node)
+        // The hair is a mesh, not a sprite. It still has to be registered with
+        // its layer, or the visibility and solo switches never reach it and
+        // the hair keeps rendering on top of every other layer.
+        visibility.register(def.id, mesh)
         if (parentToHead) {
           headLayers.push(node)
           headGroup.addChild(mesh)
@@ -343,6 +466,23 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
       baseY = def.offset.y + def.size.h / 2
     }
     sprite.position.set(baseX, baseY)
+    if (isEye) {
+      try {
+        const gazeFilter = new Filter({
+          glProgram: new GlProgram({ vertex: HEAD_TURN_VERTEX, fragment: EYE_GAZE_FRAGMENT }),
+          resources: {
+            gazeUniforms: {
+              uGazeX: { value: 0, type: 'f32' },
+              uGazeY: { value: 0, type: 'f32' },
+            },
+          },
+        })
+        sprite.filters = [gazeFilter]
+        gazeFilters.push(gazeFilter)
+      } catch (err) {
+        console.warn('[avatar] eye gaze filter failed', def.id, err)
+      }
+    }
     const node: LayerNode = {
       def,
       sprite,
@@ -356,7 +496,8 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
       isHair: false,
     }
     layerNodes.push(node)
-    partOf(def.id).nodes.push(node)
+    if (isMouthCavity) mouthCavityNode = node
+    visibility.register(def.id, sprite)
     if (parentToHead) {
       headLayers.push(node)
       headGroup.addChild(sprite)
@@ -387,11 +528,19 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
         ? (headPivotY - eyeLineY) / 0.72
         : null
   if (faceHeight != null && headPivotY != null) {
-    // Keep the head layer down to the neck pivot, but fade its last slice so
-    // the moving neck blends into the body instead of ending on a hard line.
+    // The head layer is baked from the full foreground and usually carries a
+    // slice of neck. That slice must not travel with the head: the body layer
+    // already owns the neck, and moving both copies is what tore the neckline
+    // apart. Cut the head just below the chin so the neck stays on the body.
+    // If the body layer starts lower than the chin (an asset whose split left
+    // no neck behind the jaw), keep enough neck to overlap it instead of
+    // cutting a hole.
     // The hair is painted back on top of the fade: a plain horizontal cut also
     // slices through the hair, which is what produced the rectangular edge.
-    const headBottomY = headPivotY
+    const chinY = headPivotY - 0.14 * faceHeight
+    const chinCutY = chinY + faceHeight * 0.04
+    const bodyTopY = manifest.layers.body?.offset.y
+    const headBottomY = bodyTopY != null && bodyTopY > chinCutY ? bodyTopY : chinCutY
     if (headLayerNode?.sprite) {
       const headDef = headLayerNode.def
       const top = headDef.offset.y
@@ -403,7 +552,6 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
         maskCanvas.height = Math.max(1, Math.round(headDef.size.h))
         const maskCtx = maskCanvas.getContext('2d')
         if (maskCtx) {
-          const chinY = headPivotY - 0.14 * faceHeight
           const chinStop = clamp((chinY - headDef.offset.y) / maskCanvas.height, 0, 0.999)
           const cutStop = clamp((cutY - headDef.offset.y) / maskCanvas.height, chinStop + 0.001, 1)
           const gradient = maskCtx.createLinearGradient(0, 0, 0, maskCanvas.height)
@@ -426,14 +574,19 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
             )
           }
         }
-        const maskTexture = Texture.from(maskCanvas)
-        textures.push(maskTexture)
-        const mask = new Sprite(maskTexture)
+        const headMaskTexture = Texture.from(maskCanvas)
+        textures.push(headMaskTexture)
+        const mask = new Sprite(headMaskTexture)
         mask.position.set(headDef.offset.x, top)
         mask.width = headDef.size.w
         mask.height = headDef.size.h
         headGroup.addChild(mask)
-        headLayerNode.sprite.mask = mask
+        // The mask encodes the fade in its alpha channel: the gradient is
+        // white with a falling alpha, and the hair slices are drawn back in
+        // to stay fully opaque below the chin. Pixi reads the red channel by
+        // default, which would take the hair's own dark colour as the mask
+        // value and dim the hair baked into the head layer.
+        headLayerNode.sprite.setMask({ mask, channel: 'alpha' })
       }
     }
     // The body bbox is expanded upward into the jaw. Keep only the part below
@@ -449,7 +602,7 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
         mask.width = bodyLayerNode.def.size.w
         mask.height = bottom - cutY
         bodyGroup.addChild(mask)
-        bodyLayerNode.sprite.mask = mask
+        bodyLayerNode.sprite.setMask({ mask, channel: 'alpha' })
       }
     }
   }
@@ -479,7 +632,7 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
         headGroup.addChild(overlay)
         textures.push(variant.texture)
         eyeOverlays.push({ sprite: overlay, base: baseNode.sprite })
-        partOf(eyeId).overlays.push(overlay)
+        visibility.registerOverlay(eyeId, overlay)
       } catch (err) {
         console.warn('[avatar] closed eye texture failed', eyeId, err)
       }
@@ -488,15 +641,18 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
 
   const mouthDef = manifest.layers.mouth
   const mouthImage = images.get('mouth')
-  if (mouthDef && mouthImage) {
+  const mouthBaseNode = layerNodes.find((node) => node.def.id === 'mouth')
+  // Only the fallback path needs the pre-drawn mouth textures. When the
+  // continuous mouth rig is in use the mouth is a mesh, and the old overlays
+  // would draw a second mouth on top of it.
+  if (mouthDef && mouthImage && mouthBaseNode?.sprite) {
     try {
       const variants = createMouthVariantTextures(mouthImage, mouthDef)
-      const baseNode = layerNodes.find((node) => node.def.id === 'mouth')
-      if (variants && baseNode?.sprite) {
+      if (variants && mouthBaseNode.sprite) {
         const makeOverlay = (texture: Texture, z: number) => {
           const sprite = new Sprite(texture)
-          sprite.anchor.set(baseNode.sprite!.anchor.x, baseNode.sprite!.anchor.y)
-          sprite.position.set(baseNode.baseX, baseNode.baseY)
+          sprite.anchor.set(mouthBaseNode!.sprite!.anchor.x, mouthBaseNode!.sprite!.anchor.y)
+          sprite.position.set(mouthBaseNode!.baseX, mouthBaseNode!.baseY)
           sprite.zIndex = mouthDef.z + z
           sprite.alpha = 0
           headGroup.addChild(sprite)
@@ -511,12 +667,29 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
           smile: makeOverlay(variants.smile.texture, 0.35),
         }
         mouthOverlays = overlays
-        const mouthParts = partOf('mouth')
-        for (const overlay of Object.values(overlays)) mouthParts.overlays.push(overlay)
+        for (const overlay of Object.values(overlays)) {
+          visibility.registerOverlay('mouth', overlay)
+        }
       }
     } catch (err) {
       console.warn('[avatar] mouth variants failed', err)
     }
+  }
+
+  // A renderable that was never registered with its layer keeps rendering no
+  // matter what the visibility switches say. Catch that here instead of
+  // letting it show up as a layer that cannot be switched off.
+  const unregistered = visibility.findUnregistered([
+    ...layerNodes.flatMap((node) =>
+      [node.sprite, node.mesh].filter((target): target is Sprite | Mesh => Boolean(target)),
+    ),
+    ...eyeOverlays.map((entry) => entry.sprite),
+    ...(mouthOverlays ? Object.values(mouthOverlays) : []),
+  ])
+  if (unregistered.length) {
+    console.warn(
+      `[avatar] ${unregistered.length} renderable(s) are not registered with a layer and cannot be hidden`,
+    )
   }
 
   let headTurnFilter: Filter | null = null
@@ -525,11 +698,14 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
     const bounds = headGroup.getLocalBounds()
     const centerX = (headPivot.x - bounds.x) / Math.max(1, bounds.width)
     const halfWidth = headLayerDef.size.w / Math.max(1, bounds.width) / 2
-    const chinY =
+    // Anchor the warp at the chin cut. The neck below it belongs to the body
+    // and must stay perfectly still, otherwise the two neck copies slide
+    // against each other and the neckline tears.
+    const chinCutY =
       faceHeight != null && headPivotY != null
-        ? headPivotY - 0.14 * faceHeight
-        : bounds.y + bounds.height * 0.82
-    const neckY = (chinY - bounds.y) / Math.max(1, bounds.height)
+        ? headPivotY - 0.1 * faceHeight
+        : bounds.y + bounds.height
+    const neckY = clamp((chinCutY - bounds.y) / Math.max(1, bounds.height), 0, 1)
     headTurnFilter = new Filter({
       glProgram: new GlProgram({ vertex: HEAD_TURN_VERTEX, fragment: HEAD_TURN_FRAGMENT }),
       resources: {
@@ -569,6 +745,13 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
   // full idle (head sway, breathing, blinking) is one click away.
   let idleEnabled = false
   let gesture: { type: GestureType; start: number; duration: number } | null = null
+  let gazeX = 0
+  let gazeY = 0
+  let gazeTargetX = 0
+  let gazeTargetY = 0
+  let nextGazeAt = 0.7 + Math.random() * 1.5
+  let expressionSquint = 0
+  let expressionSquintTarget = 0
   let smileAmount = 0
   let smileTarget = 0
   /** Mouth shape driven by the audio analysis; null falls back to the levels. */
@@ -646,14 +829,7 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
   }
 
   const applyLayerVisibility = () => {
-    for (const [id, entry] of layerParts) {
-      const on = soloLayer ? id === soloLayer : layerVisibility.get(id) !== false
-      for (const node of entry.nodes) {
-        if (node.sprite) node.sprite.visible = on
-        if (node.mesh) node.mesh.visible = on
-      }
-      for (const overlay of entry.overlays) overlay.visible = on
-    }
+    visibility.apply(soloLayer, layerVisibility)
   }
 
   const tick = (ticker: { deltaMS: number }) => {
@@ -667,16 +843,40 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
       lastFpsSample = now
     }
 
-    const idleAngleX = idleEnabled
-      ? Math.sin((idleTime / 7.4) * Math.PI * 2) * 0.13 +
-        Math.sin((idleTime / 3.3) * Math.PI * 2) * 0.025
-      : 0
-    const idleAngleY = idleEnabled ? Math.sin((idleTime / 9.2) * Math.PI * 2) * 0.06 : 0
-    const idleAngleZ = idleEnabled ? Math.sin((idleTime / 8.1) * Math.PI * 2) * 0.035 : 0
-    const idleBody = idleEnabled ? Math.sin((idleTime / 6.9) * Math.PI * 2) * 0.09 : 0
+    // A single sine reads as a metronome. Three incommensurate periods per
+    // axis give a slow, non-repeating sway without needing a noise library.
+    const organic = (t: number, p1: number, p2: number, p3: number, phase: number) =>
+      Math.sin(t / p1 + phase) * 0.55 +
+      Math.sin(t / p2 + phase * 1.7) * 0.3 +
+      Math.sin(t / p3 + phase * 0.6) * 0.15
+    const idleAngleX = idleEnabled ? organic(idleTime, 7.4, 3.1, 11.3, 0.2) * 0.13 : 0
+    const idleAngleY = idleEnabled ? organic(idleTime, 9.2, 4.3, 13.1, 1.1) * 0.06 : 0
+    const idleAngleZ = idleEnabled ? organic(idleTime, 8.1, 3.7, 12.4, 2.0) * 0.035 : 0
+    const idleBody = idleEnabled ? organic(idleTime, 6.9, 2.9, 10.7, 0.7) * 0.09 : 0
     const idleBreath = idleEnabled
-      ? 0.5 + 0.5 * Math.sin((idleTime / 4.7) * Math.PI * 2 + 0.6)
+      ? 0.5 + 0.5 * organic(idleTime, 4.7, 2.3, 8.8, 0.6)
       : 0.35
+
+    expressionSquint = smooth(expressionSquint, expressionSquintTarget, 180, dt)
+    if (pointerActive) {
+      gazeTargetX = pointerX * 0.85
+      gazeTargetY = pointerY * 0.55
+      nextGazeAt = idleTime + 1.4
+    } else if (idleEnabled && idleTime > nextGazeAt) {
+      gazeTargetX = (Math.random() * 2 - 1) * 0.85
+      gazeTargetY = (Math.random() * 2 - 1) * 0.5
+      nextGazeAt = idleTime + 0.7 + Math.random() * 2.2
+    } else if (!idleEnabled) {
+      gazeTargetX = 0
+      gazeTargetY = 0
+    }
+    const gazeAlpha = 1 - Math.exp(-dt * 22)
+    gazeX += (gazeTargetX - gazeX) * gazeAlpha
+    gazeY += (gazeTargetY - gazeY) * gazeAlpha
+    for (const filter of gazeFilters) {
+      filter.resources.gazeUniforms.uniforms.uGazeX = gazeX * 0.06
+      filter.resources.gazeUniforms.uniforms.uGazeY = gazeY * 0.04
+    }
 
     let gestureX = 0
     let gestureY = 0
@@ -798,7 +998,7 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
 
     for (const node of layerNodes) {
       if (node.mesh) {
-        updateHairMesh(node, ax, ay, hairLagX, hairLagY)
+        if (node.isHair) updateHairMesh(node, ax, ay, hairLagX, hairLagY)
         continue
       }
       if (!node.sprite) continue
@@ -812,10 +1012,41 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
     }
 
     const smileSquint = smileAmount * 0.12
-    const eyeClose = clamp(blinkClose + smileSquint, 0, 1)
+    const eyeClose = clamp(blinkClose + smileSquint + expressionSquint, 0, 1)
     for (const overlay of eyeOverlays) {
       overlay.base.alpha = 1 - eyeClose
       overlay.sprite.alpha = eyeClose
+    }
+
+    // The cavity only exists while the mouth is open. With it fully opaque the
+    // dark interior leaks through the resting aperture and a closed mouth
+    // reads as a black seam.
+    if (mouthCavityNode?.sprite) {
+      mouthCavityNode.sprite.alpha = clamp(mouth * 2.4, 0, 1)
+    }
+
+    if (mouthMeshes.length) {
+      // The continuous mouth: one weighted sum over the vertices of the mouth
+      // and of the cavity behind it. Both meshes share the weights, so the
+      // cavity always stays glued to the lips.
+      const deformShape: MouthShape = {
+        viseme: shape?.viseme ?? 'rest',
+        openness: mouth,
+        width: lipWidth,
+        roundness,
+        teeth: teethAmount,
+        level: shape?.level ?? mouth,
+      }
+      // The cavity is only visible while the mouth is open. With it fully
+      // opaque the dark interior leaks through the resting aperture and the
+      // closed mouth reads as a black seam; fading it in leaves the original
+      // closed lips untouched.
+      for (const entry of mouthMeshes) {
+        const positions = entry.mesh.geometry.positions
+        deformMouthPositions(entry.base, entry.weights, entry.control, deformShape, positions)
+        // Changing the positions is not enough: the buffer has to be told.
+        entry.mesh.geometry.getBuffer('aPosition').update()
+      }
     }
 
     if (mouthOverlays) {
@@ -865,12 +1096,31 @@ export async function createStageRuntime(options: StageOptions): Promise<StageHa
       applyLayerVisibility()
     },
     setExpression(id) {
+      smileTarget = id === 'smile' ? 1 : 0
+      external.ParamMouthForm = 0
+      external.ParamMouthOpenY = 0
+      external.ParamAngleY = 0
+      external.ParamAngleZ = 0
+      expressionSquintTarget = 0
+      gazeTargetX = 0
+      gazeTargetY = 0
+      nextGazeAt = idleTime + 1.6
       if (id === 'smile') {
-        smileTarget = 1
         external.ParamMouthForm = 0.65
-      } else if (id === 'neutral') {
-        smileTarget = 0
-        external.ParamMouthForm = 0
+      } else if (id === 'sad') {
+        external.ParamMouthForm = -0.45
+        external.ParamAngleY = -0.12
+        expressionSquintTarget = 0.1
+        gazeTargetY = -0.45
+      } else if (id === 'angry') {
+        external.ParamMouthForm = -0.3
+        external.ParamAngleY = -0.05
+        external.ParamAngleZ = -0.05
+        expressionSquintTarget = 0.26
+      } else if (id === 'surprised') {
+        external.ParamMouthOpenY = 0.55
+        external.ParamAngleY = 0.12
+        gazeTargetY = 0.2
       }
     },
     playMotion(id) {

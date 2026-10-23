@@ -83,16 +83,32 @@ export function toPlainCharacter(record: CharacterRecord): CharacterRecord {
  * only the stacking order in the manifest changes.
  */
 export function migrateCharacterRecord(record: CharacterRecord): CharacterRecord {
+  let next = record
   const hairBack = record.manifest.layers.hairBack
-  if (!hairBack || hairBack.z >= 26) return record
-  return {
-    ...record,
-    manifest: {
-      ...record.manifest,
-      layers: {
-        ...record.manifest.layers,
-        hairBack: { ...hairBack, z: 26, parent: 'head' },
+  if (hairBack && hairBack.z < 26) {
+    next = {
+      ...next,
+      manifest: {
+        ...next.manifest,
+        layers: {
+          ...next.manifest.layers,
+          hairBack: { ...hairBack, z: 26, parent: 'head' },
+        },
       },
-    },
+    }
   }
+  const voice = next.persona.voice
+  // Older builds defaulted every character to the loudness-only mouth model.
+  // Move them to the richer viseme model once; the marker keeps a user who
+  // deliberately switches back from being migrated again on the next load.
+  if (voice.visemeMode === 'envelope' && !voice.visemeModeMigrated) {
+    next = {
+      ...next,
+      persona: {
+        ...next.persona,
+        voice: { ...voice, visemeMode: 'approx', visemeModeMigrated: true },
+      },
+    }
+  }
+  return next
 }

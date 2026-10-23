@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
+import { installAudioUnlock } from './services/audio/player'
 import { installNativeFetch } from './services/platform/fetchShim'
 import { isNativeRuntime } from './services/platform/bridge'
 import { migrateLegacyCharacters } from './services/storage/characterRepo'
@@ -10,6 +11,7 @@ import './styles/tokens.css'
 import './styles/base.css'
 
 installNativeFetch()
+installAudioUnlock()
 // The shell header is the window's drag region: Tauri reads the
 // `data-tauri-drag-region` attribute, and the CSS rules under `body.is-native`
 // lay the header out as an overlay title bar.

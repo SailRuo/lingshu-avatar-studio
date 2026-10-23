@@ -28,6 +28,7 @@ import { useCharacterStore } from '../stores/useCharacterStore'
 import { useProviderStore } from '../stores/useProviderStore'
 import { useUiStore } from '../stores/useUiStore'
 import { sendChat } from '../services/chat/chatService'
+import { rebuildMouthCavity, upgradeMouthCavity } from '../services/agent/openMouthReference'
 import { stripForSpeech } from '../services/chat/persona'
 import {
   appendChat,
@@ -66,6 +67,10 @@ const idleEnabled = ref(false)
 const speaking = ref(false)
 const showClear = ref(false)
 const exporting = ref(false)
+const mouthUpgrading = ref(false)
+const mouthRebuilding = ref(false)
+/** Bumped to force the stage to rebuild after a layer is replaced. */
+const stageKey = ref(0)
 const speech = new SpeechQueue()
 /** Per-layer visibility switches, keyed by layer id. */
 const layerVisible = ref<Record<string, boolean>>({})
@@ -103,7 +108,7 @@ const tierText = computed(() => {
 })
 const simplified = computed(() => !!record.value && record.value.manifest.tier !== 'full')
 /** Which mouth model the character uses while it speaks. */
-const visemeMode = computed(() => record.value?.persona.voice.visemeMode ?? 'envelope')
+const visemeMode = computed(() => record.value?.persona.voice.visemeMode ?? 'approx')
 /**
  * Why the character stays silent. Without this the chat simply produces no
  * voice and no lip movement, which reads as a broken app.
@@ -337,6 +342,84 @@ function blinkTest() {
   stageRef.value?.blink()
 }
 
+/**
+ * Replaces the painted mouth cavity with real open-mouth pixels.
+ *
+ * A character generated from a closed mouth has no interior to sample, so the
+ * cavity is painted. One image edit of the mouth gives the deformation real
+ * teeth to reveal. This runs on demand — it costs one image call.
+ */
+/**
+ * Rebuilds the cavity from the character's own pixels. Free, instant, and it
+ * repairs a cavity baked by an older pipeline.
+ */
+async function rebuildMouth() {
+  const current = record.value
+  if (!current || mouthRebuilding.value) return
+  mouthRebuilding.value = true
+  try {
+    const result = await rebuildMouthCavity({ record: current })
+    if (!result.rebuilt) {
+      ui.notify(result.note, 'error', 6000)
+      return
+    }
+    await characters.save(result.record)
+    record.value = result.record
+    stageKey.value += 1
+    ui.notify(result.note, 'success', 4000)
+  } catch (err) {
+    ui.notify(userMessageForError(err), 'error', 7000)
+  } finally {
+    mouthRebuilding.value = false
+  }
+}
+
+async function upgradeMouth() {
+  const current = record.value
+  if (!current || mouthUpgrading.value) return
+  const provider = providers.roleProvider('image')
+  if (!provider) {
+    ui.notify('还没有配置生图服务商。', 'error')
+    return
+  }
+  if (!provider.supportsEdit || !provider.models.image) {
+    ui.notify('当前生图服务商不支持图像编辑，无法生成张嘴素材。', 'error', 7000)
+    return
+  }
+  if (!current.rig.mouth || !current.manifest.layers.mouthCavity) {
+    ui.notify('这个角色没有连续口型绑定，无法替换口腔。', 'error', 7000)
+    return
+  }
+  const key = await providers.getKey(provider.id)
+  if (!key) {
+    ui.notify('没有读取到生图 Key，请到服务商设置里重新保存。', 'error', 7000)
+    return
+  }
+  mouthUpgrading.value = true
+  try {
+    const result = await upgradeMouthCavity({
+      record: current,
+      provider,
+      apiKey: key,
+      model: providers.roleModel('image'),
+    })
+    if (!result.upgraded) {
+      ui.notify(result.note, 'info', 6000)
+      return
+    }
+    await characters.save(result.record)
+    record.value = result.record
+    // The stage builds its textures once on mount, so remount it to pick up
+    // the replaced cavity layer.
+    stageKey.value += 1
+    ui.notify('口腔与牙齿已换成真实张嘴素材。', 'success', 5000)
+  } catch (err) {
+    ui.notify(userMessageForError(err), 'error', 7000)
+  } finally {
+    mouthUpgrading.value = false
+  }
+}
+
 function mouthTest() {
   stageRef.value?.setMouthOpen(0.88)
   window.setTimeout(() => stageRef.value?.setMouthOpen(0), 360)
@@ -502,6 +585,24 @@ onBeforeUnmount(() => {
           <template #icon><Download :size="14" /></template>
           PSD
         </BaseButton>
+        <BaseButton
+          size="sm"
+          :loading="mouthRebuilding"
+          :disabled="mouthRebuilding"
+          @click="rebuildMouth"
+        >
+          <template #icon><RotateCw :size="14" /></template>
+          修复口腔
+        </BaseButton>
+        <BaseButton
+          size="sm"
+          :loading="mouthUpgrading"
+          :disabled="mouthUpgrading"
+          @click="upgradeMouth"
+        >
+          <template #icon><Smile :size="14" /></template>
+          补张嘴素材
+        </BaseButton>
       </div>
     </header>
 
@@ -573,6 +674,7 @@ onBeforeUnmount(() => {
         </div>
         <AvatarStage
           ref="stageRef"
+          :key="stageKey"
           :manifest="record.manifest"
           :rig="record.rig"
           :layers="record.layers"
@@ -584,6 +686,9 @@ onBeforeUnmount(() => {
           <button type="button" class="stage-control" @click="setExpression('smile')">
             <Smile :size="14" /> 微笑
           </button>
+          <button type="button" class="stage-control" @click="setExpression('sad')">难过</button>
+          <button type="button" class="stage-control" @click="setExpression('angry')">生气</button>
+          <button type="button" class="stage-control" @click="setExpression('surprised')">惊讶</button>
           <button type="button" class="stage-control" @click="blinkTest">
             <Zap :size="14" /> 眨眼
           </button>

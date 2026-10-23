@@ -29,7 +29,8 @@ export function defaultPersona(spec: CharacterSpec, overrides: Partial<Persona> 
     systemPromptExtra: '',
     voice: {
       speed: 1,
-      visemeMode: 'envelope',
+      visemeMode: 'approx',
+      visemeModeMigrated: true,
     },
     memory: {
       enabled: true,

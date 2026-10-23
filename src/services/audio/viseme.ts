@@ -301,6 +301,8 @@ export interface SmootherOptions {
   hopMs?: number
   /** How long a mouth shape is kept before a different one may take over. */
   minHoldMs?: number
+  /** Smoothing time for lip width / roundness / teeth, in milliseconds. */
+  shapeMs?: number
 }
 
 /**
@@ -313,6 +315,7 @@ export interface SmootherOptions {
 export class MouthShapeSmoother {
   private attack: number
   private release: number
+  private shapeAlpha: number
   private minHoldFrames: number
   private current: MouthShape = { ...REST_SHAPE }
   private hold = 0
@@ -323,8 +326,10 @@ export class MouthShapeSmoother {
     const hopMs = options.hopMs ?? DEFAULT_HOP_MS
     const attackMs = options.attackMs ?? 30
     const releaseMs = options.releaseMs ?? 90
+    const shapeMs = options.shapeMs ?? 80
     this.attack = Math.max(0, 1 - Math.exp(-hopMs / Math.max(1, attackMs)))
     this.release = Math.max(0, 1 - Math.exp(-hopMs / Math.max(1, releaseMs)))
+    this.shapeAlpha = Math.max(0, 1 - Math.exp(-hopMs / Math.max(1, shapeMs)))
     this.minHoldFrames = Math.max(1, Math.round((options.minHoldMs ?? 60) / hopMs))
   }
 
@@ -371,12 +376,24 @@ export class MouthShapeSmoother {
     }
 
     const rest = viseme === 'rest'
+    // Width, roundness and teeth used to snap to the new viseme's target on
+    // the same frame, which is what made the mouth look like it was flipping
+    // between pre-drawn shapes. Ease all of them alongside the opening.
+    const width = rest
+      ? 0
+      : this.current.width + (shape.width - this.current.width) * this.shapeAlpha
+    const roundness = rest
+      ? 0
+      : this.current.roundness + (shape.roundness - this.current.roundness) * this.shapeAlpha
+    const teeth = rest
+      ? 0
+      : this.current.teeth + (shape.teeth - this.current.teeth) * this.shapeAlpha
     this.current = {
       viseme,
       openness,
-      width: rest ? 0 : shape.width,
-      roundness: rest ? 0 : shape.roundness,
-      teeth: rest ? 0 : shape.teeth,
+      width,
+      roundness,
+      teeth,
       level,
     }
     return this.current

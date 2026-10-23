@@ -7,9 +7,11 @@ import type {
 } from '../../types/character'
 import type { FaceGeometry } from '../cv/geometry'
 import type { BuiltLayer } from '../imaging/layers'
+import { buildMouthField, controlFromGeometry, mouthGridFor } from '../render/mouthDeform'
 import type {
   BindingDef,
   MeshDef,
+  MouthFieldDef,
   ParamDef,
   RigDocument,
   StateDef,
@@ -38,7 +40,15 @@ const PARAMETERS: ParamDef[] = [
 function meshesFor(layers: BuiltLayer[]): Record<string, MeshDef> {
   const meshes: Record<string, MeshDef> = {}
   for (const layer of layers) {
-    if (layer.id === 'hairFront') {
+    if (layer.id === 'mouth' || layer.id === 'mouthCavity') {
+      const grid = mouthGridFor(layer.bbox)
+      meshes[layer.id] = {
+        cols: grid.cols,
+        rows: grid.rows,
+        falloff: 'none',
+        deformers: [],
+      }
+    } else if (layer.id === 'hairFront') {
       meshes[layer.id] = {
         cols: 16,
         rows: 24,
@@ -78,8 +88,7 @@ function meshesFor(layers: BuiltLayer[]): Record<string, MeshDef> {
   return meshes
 }
 
-function bindingsFor(hasBody: boolean): BindingDef[] {
-  return [
+function bindingsFor(hasBody: boolean): BindingDef[] {  return [
     {
       param: 'ParamAngleX',
       target: { kind: 'node', id: 'head', property: 'x' },
@@ -123,6 +132,57 @@ function bindingsFor(hasBody: boolean): BindingDef[] {
   ]
 }
 
+/** Float arrays are stored as plain numbers, rounded to keep the pack small. */
+function toNumbers(values: Float32Array): number[] {
+  return Array.from(values, (value) => Math.round(value * 10000) / 10000)
+}
+
+/**
+ * Builds the deformation field of the mouth and stores it in the rig.
+ *
+ * The field is computed once, here, and travels with the character pack. The
+ * runtime only reads the weights and runs the weighted sum, so nothing has to
+ * look at the face landmarks again after the character was imported.
+ */
+function mouthFieldFor(layers: BuiltLayer[], geometry: FaceGeometry): MouthFieldDef | undefined {
+  const mouth = layers.find((layer) => layer.id === 'mouth')
+  const cavity = layers.find((layer) => layer.id === 'mouthCavity')
+  if (!mouth || !cavity) return undefined
+  // Both layers have to share one grid, otherwise the edge of the cavity
+  // would drift away from the lips.
+  const same =
+    Math.abs(mouth.bbox.x - cavity.bbox.x) < 0.5 &&
+    Math.abs(mouth.bbox.y - cavity.bbox.y) < 0.5 &&
+    Math.abs(mouth.bbox.w - cavity.bbox.w) < 0.5 &&
+    Math.abs(mouth.bbox.h - cavity.bbox.h) < 0.5
+  if (!same) return undefined
+  const control = controlFromGeometry(geometry)
+  const grid = mouthGridFor(mouth.bbox)
+  const field = buildMouthField({
+    rect: mouth.bbox,
+    cols: grid.cols,
+    rows: grid.rows,
+    control,
+  })
+  return {
+    cols: grid.cols,
+    rows: grid.rows,
+    rect: { ...mouth.bbox },
+    upper: toNumbers(field.weights.upper),
+    lower: toNumbers(field.weights.lower),
+    corner: toNumbers(field.weights.corner),
+    side: toNumbers(field.weights.side),
+    control: {
+      upper: control.upper,
+      lower: control.lower,
+      cornerL: control.cornerL,
+      cornerR: control.cornerR,
+      innerUpper: control.innerUpper,
+      innerLower: control.innerLower,
+    },
+  }
+}
+
 export function buildRig(
   layers: BuiltLayer[],
   geometry: FaceGeometry,
@@ -160,6 +220,7 @@ export function buildRig(
   const hasHair = layers.some((layer) => layer.id === 'hairFront' || layer.id === 'hairBack')
 
   const states: StateDef[] = []
+  const mouthField = mouthFieldFor(layers, geometry)
   const rig: RigDocument = {
     formatVersion: 1,
     canvas: { width, height },
@@ -208,6 +269,7 @@ export function buildRig(
       },
     },
     limits: { angleX: 0.45, angleY: 0.35, angleZ: 0.25 },
+    ...(mouthField ? { mouth: mouthField } : {}),
   }
 
   return {

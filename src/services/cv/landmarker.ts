@@ -20,9 +20,29 @@ export const FACE_OVAL_INDICES = [
 
 export const LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]
 export const RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380]
+// Full lid rings, in the order MediaPipe draws the eye outline. The six-point
+// sets above only describe the eye's extent, which is not enough to cut along
+// the real lash line.
+export const LEFT_EYE_RING_INDICES = [
+  33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246,
+]
+export const RIGHT_EYE_RING_INDICES = [
+  362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398,
+]
 export const LIPS_OUTER_INDICES = [
   61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39,
   40, 185,
+]
+/**
+ * The inner lip ring: the edge of the actual mouth opening.
+ *
+ * The outer ring only describes the outside of the lips, which is enough to cut
+ * the mouth layer but not to open it — a mouth that opens has to reveal the
+ * cavity behind the lips, and the inner ring is the boundary of that cavity.
+ */
+export const LIPS_INNER_INDICES = [
+  78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81,
+  80, 191,
 ]
 export const LEFT_BROW_INDICES = [70, 63, 105, 66, 107]
 export const RIGHT_BROW_INDICES = [336, 296, 334, 293, 300]

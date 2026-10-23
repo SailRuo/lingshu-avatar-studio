@@ -1,4 +1,4 @@
-import type { Point } from './character'
+import type { Point, Rect } from './character'
 
 export type DeformerDef =
   | { type: 'sway'; axis: 'x' | 'y'; amplitude: number; frequency: number; phaseJitter?: number }
@@ -52,6 +52,33 @@ export interface MotionDef {
   tracks: Array<{ param: string; keys: Array<[number, number]> }>
 }
 
+/**
+ * The deformation field of the mouth.
+ *
+ * It is computed once when the character is imported and travels with the
+ * character pack, so the runtime never has to look at the face landmarks
+ * again: it only runs the weighted sum over these weights.
+ */
+export interface MouthFieldDef {
+  cols: number
+  rows: number
+  /** The area the grid covers, in character coordinates. */
+  rect: Rect
+  /** Per-vertex weights, one entry per grid vertex. */
+  upper: number[]
+  lower: number[]
+  corner: number[]
+  side: number[]
+  control: {
+    upper: Point
+    lower: Point
+    cornerL: Point
+    cornerR: Point
+    innerUpper: Point
+    innerLower: Point
+  }
+}
+
 export interface RigDocument {
   formatVersion: 1
   canvas: { width: number; height: number }
@@ -62,4 +89,6 @@ export interface RigDocument {
   states: StateDef[]
   motions: Record<string, MotionDef>
   limits: { angleX: number; angleY: number; angleZ: number }
+  /** Present when the character was built with the continuous mouth rig. */
+  mouth?: MouthFieldDef
 }

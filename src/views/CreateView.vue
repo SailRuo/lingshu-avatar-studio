@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import {
   ArrowLeft,
@@ -15,12 +15,34 @@ import {
   Volume2,
   Wand2,
 } from 'lucide-vue-next'
-import type { CharacterSpec } from '../types/character'
+import type { CharacterRecord, CharacterSpec } from '../types/character'
+import type { CharacterReview, ReviewPart } from '../types/analysis'
 import type { ProviderRole } from '../types/provider'
 import { useProviderStore } from '../stores/useProviderStore'
 import { useCharacterStore } from '../stores/useCharacterStore'
 import { useUiStore } from '../stores/useUiStore'
-import { createCharacter, type CreateCharacterResult } from '../services/agent/createCharacter'
+import {
+  createCharacter,
+  type CharacterProgressEvent,
+  type CreateCharacterResult,
+} from '../services/agent/createCharacter'
+import {
+  providerSupportsMaskEdit,
+  redrawPart,
+  refineParts,
+} from '../services/agent/redrawPart'
+import { upgradeMouthCavity } from '../services/agent/openMouthReference'
+import {
+  REDRAW_PARTS,
+  buildPartPrompt,
+  defaultPartInstruction,
+  partLabelZh,
+  partSpec,
+  specForRecord,
+  type RedrawPart,
+} from '../services/agent/redrawPlan'
+import { reviewCharacter, type ReviewStepId } from '../services/agent/reviewCharacter'
+import { partExists } from '../services/imaging/compose'
 import { buildBasePrompt } from '../services/agent/prompts'
 import { providerNeedsUserProxy } from '../services/platform/runtime'
 import { userMessageForError, ProviderError } from '../services/providers/http'
@@ -55,8 +77,37 @@ const activePreset = ref('')
 const controller = ref<AbortController | null>(null)
 const stageRef = ref<InstanceType<typeof AvatarStage> | null>(null)
 const testingVoice = ref(false)
+const autoRefine = ref(false)
+const stageVersion = ref(0)
+const selectedPart = ref<RedrawPart | null>(null)
+const redrawInstruction = ref('')
+const redrawBusy = ref(false)
+const redrawError = ref('')
+const redrawProgress = ref<{ label: string; progress?: number } | null>(null)
+const undoStack = ref<Array<{ record: CharacterRecord; part: RedrawPart }>>([])
+const analysisStale = ref(false)
+const refineStatus = ref<Partial<Record<RedrawPart, 'done' | 'failed' | 'skipped'>>>({})
+const reviewBusy = ref(false)
+const reviewError = ref('')
+const reviewResult = ref<CharacterReview | null>(null)
+const reviewSteps = ref<
+  Array<{
+    id: ReviewStepId
+    label: string
+    status: 'pending' | 'running' | 'done' | 'failed'
+    detail?: string
+  }>
+>([])
+const reviewPreviewUrl = ref<string | null>(null)
 const speech = new SpeechQueue()
 let mouthFrame = 0
+
+const REVIEW_STEPS: Array<{ id: ReviewStepId; label: string }> = [
+  { id: 'compose', label: '合成当前图层' },
+  { id: 'vision', label: '多模态模型审查' },
+  { id: 'parse', label: '读取审查结论' },
+  { id: 'plan', label: '生成修复建议' },
+]
 
 const spec = reactive<CharacterSpec>({
   name: '',
@@ -164,6 +215,33 @@ const ttsProvider = computed(() =>
 const imageReady = computed(() => providers.isRoleReady('image'))
 const agentReady = computed(() => providers.isRoleReady('chat'))
 const ttsReady = computed(() => providers.isRoleReady('tts'))
+const maskEdit = computed(() =>
+  imageProvider.value ? providerSupportsMaskEdit(imageProvider.value) : false,
+)
+/**
+ * Whether the provider can edit an existing picture at all. Mask editing is
+ * stricter, but the mouth reference only needs a crop round-trip, so a plain
+ * reference-edit provider is enough for it.
+ */
+const canEditImage = computed(() => {
+  const provider = imageProvider.value
+  if (!provider) return false
+  return maskEdit.value || (provider.supportsEdit === true && Boolean(provider.models.image))
+})
+const redrawParts = computed(() => {
+  const record = result.value?.record
+  if (!record) return []
+  return REDRAW_PARTS.filter((part) => partExists(record, part.id))
+})
+const redrawPromptPreview = computed(() => {
+  if (!result.value || !selectedPart.value) return ''
+  return buildPartPrompt(
+    specForRecord(result.value.record),
+    selectedPart.value,
+    redrawInstruction.value,
+    maskEdit.value ? 'mask' : 'reference',
+  )
+})
 
 const promptPreview = computed(() => buildBasePrompt(spec))
 
@@ -251,12 +329,18 @@ async function startGenerate() {
 
   error.value = ''
   result.value = null
+  refineStatus.value = {}
+  selectedPart.value = null
+  redrawInstruction.value = ''
+  redrawError.value = ''
+  undoStack.value = []
+  analysisStale.value = false
   busy.value = true
   step.value = 3
   controller.value = new AbortController()
   const current = controller.value
   try {
-    const created = await createCharacter({
+    let created = await createCharacter({
       spec,
       imageProvider: imageProvider.value,
       imageKey,
@@ -270,6 +354,60 @@ async function startGenerate() {
       },
     })
     if (current.signal.aborted) return
+
+    if (autoRefine.value && maskEdit.value) {
+      progress.value = { label: '分部精修：身体与衣领', progress: 0.9 }
+      const refined = await refineParts({
+        record: created.record,
+        provider: imageProvider.value!,
+        apiKey: imageKey,
+        model: providers.roleModel('image'),
+        signal: current.signal,
+        onProgress: (event) => {
+          progress.value = {
+            ...event,
+            progress: event.progress === undefined ? 0.9 : 0.9 + event.progress * 0.1,
+          }
+        },
+      })
+      if (current.signal.aborted) return
+      created = { ...created, record: refined.record, analysis: null }
+      if (refined.completed.length || refined.failed) analysisStale.value = true
+      for (const part of refined.completed) refineStatus.value[part] = 'done'
+      for (const part of refined.skipped) refineStatus.value[part] = 'skipped'
+      if (refined.failed) refineStatus.value[refined.failed] = 'failed'
+      const failure = refined.notes.find((note) => note.includes('失败'))
+      if (failure) ui.notify(failure, 'error', 7000)
+    }
+
+    // The mouth cavity is painted by default, because a closed mouth has no
+    // interior to sample. One edit of the mouth gives the deformation real
+    // pixels to reveal — real teeth instead of a painted band.
+    if (canEditImage.value) {
+      try {
+        progress.value = { label: '生成张嘴素材', progress: 0.98 }
+        const upgraded = await upgradeMouthCavity({
+          record: created.record,
+          provider: imageProvider.value!,
+          apiKey: imageKey,
+          model: providers.roleModel('image'),
+          signal: current.signal,
+          onProgress: (event: CharacterProgressEvent) => {
+            progress.value = {
+              ...event,
+              progress: event.progress === undefined ? 0.98 : 0.95 + event.progress * 0.05,
+            }
+          },
+        })
+        if (current.signal.aborted) return
+        created = { ...created, record: upgraded.record, analysis: null }
+        if (!upgraded.upgraded) console.info('[create]', upgraded.note)
+      } catch (err) {
+        // A failed mouth edit must not lose the character that already works.
+        console.warn('[create] mouth reference failed, keeping the painted cavity', err)
+      }
+    }
+
     result.value = created
     result.value.record.persona.greeting =
       result.value.record.persona.greeting || `你好，我是${created.record.name}。`
@@ -301,10 +439,213 @@ function cancelGenerate() {
 }
 
 function regenerate() {
+  controller.value?.abort()
+  controller.value = null
+  reviewBusy.value = false
+  reviewResult.value = null
+  reviewError.value = ''
+  reviewSteps.value = []
   result.value = null
   error.value = ''
+  selectedPart.value = null
+  redrawInstruction.value = ''
+  redrawError.value = ''
+  redrawProgress.value = null
+  undoStack.value = []
+  refineStatus.value = {}
+  analysisStale.value = false
   step.value = 2
 }
+
+function selectPart(part: RedrawPart) {
+  if (!result.value) return
+  selectedPart.value = part
+  redrawError.value = ''
+  redrawInstruction.value = defaultPartInstruction(specForRecord(result.value.record), part)
+}
+
+async function redrawSelected() {
+  const part = selectedPart.value
+  if (!result.value || !part || redrawBusy.value) return
+  const provider = imageProvider.value
+  if (!provider) {
+    ui.notify('生图服务商还没有就绪。', 'error')
+    return
+  }
+  if (!maskEdit.value) {
+    ui.notify('当前服务商不支持严格蒙版重绘，局部重绘已禁用，避免破坏图层。', 'error', 6000)
+    return
+  }
+  const key = await providers.getKey(provider.id)
+  if (!key) {
+    ui.notify('没有读取到生图 Key，请重新保存。', 'error')
+    return
+  }
+
+  const previous = result.value.record
+  redrawBusy.value = true
+  redrawError.value = ''
+  redrawProgress.value = { label: '准备重绘', progress: 0.04 }
+  controller.value = new AbortController()
+  const current = controller.value
+  try {
+    const redrawn = await redrawPart({
+      record: previous,
+      part,
+      instruction: redrawInstruction.value,
+      provider,
+      apiKey: key,
+      model: providers.roleModel('image'),
+      signal: current.signal,
+      onProgress: (event) => {
+        redrawProgress.value = event
+      },
+    })
+    if (current.signal.aborted || !result.value) return
+    undoStack.value.push({ record: previous, part })
+    if (undoStack.value.length > 10) undoStack.value.shift()
+    result.value = { ...result.value, record: redrawn.record, analysis: null }
+    analysisStale.value = true
+    refineStatus.value[part] = 'done'
+    stageVersion.value += 1
+    if (!partExists(redrawn.record, part)) {
+      selectedPart.value = null
+      ui.notify(`${partLabelZh(part)}在重建后没有独立图层，已取消选择。`, 'info')
+    }
+    ui.notify(`${partLabelZh(part)}已重绘`, 'success')
+  } catch (err) {
+    if (current.signal.aborted) return
+    redrawError.value = userMessageForError(err)
+    refineStatus.value[part] = 'failed'
+  } finally {
+    if (controller.value === current) {
+      controller.value = null
+      redrawBusy.value = false
+      redrawProgress.value = null
+    }
+  }
+}
+
+function undoRedraw() {
+  const last = undoStack.value.pop()
+  if (!last || !result.value) return
+  delete refineStatus.value[last.part]
+  result.value = { ...result.value, record: last.record, analysis: null }
+  selectedPart.value = last.part
+  redrawInstruction.value = defaultPartInstruction(specForRecord(last.record), last.part)
+  stageVersion.value += 1
+  ui.notify('已撤销上一次重绘', 'info')
+}
+
+function cancelRedraw() {
+  controller.value?.abort()
+  controller.value = null
+  redrawBusy.value = false
+  redrawProgress.value = null
+  ui.notify('已取消重绘', 'info')
+}
+
+function reviewPartLabel(part: ReviewPart | 'none'): string {
+  return part === 'none' ? '整体' : partLabelZh(part)
+}
+
+async function startReview() {
+  if (!result.value || reviewBusy.value) return
+  const provider = agentProvider.value
+  if (!provider) {
+    ui.notify('先在服务商设置里绑定一个多模态智能体。', 'error', 6000)
+    return
+  }
+  const key = await providers.getKey(provider.id)
+  if (!key) {
+    ui.notify('智能体服务商还没有 Key。', 'error', 6000)
+    return
+  }
+
+  reviewBusy.value = true
+  reviewError.value = ''
+  reviewResult.value = null
+  reviewSteps.value = REVIEW_STEPS.map((step) => ({ ...step, status: 'pending' }))
+  controller.value = new AbortController()
+  const current = controller.value
+  try {
+    const review = await reviewCharacter({
+      record: result.value.record,
+      provider,
+      apiKey: key,
+      model: providers.roleModel('chat'),
+      signal: current.signal,
+      onProgress: (event) => {
+        const target = reviewSteps.value.find((step) => step.id === event.step)
+        if (target) {
+          target.status = event.status
+          target.detail = event.detail
+        }
+      },
+    })
+    if (current.signal.aborted || !result.value) return
+    reviewResult.value = review
+    if (review.targetPart) {
+      selectedPart.value = review.targetPart
+      redrawInstruction.value =
+        review.repairInstruction ||
+        defaultPartInstruction(specForRecord(result.value.record), review.targetPart)
+    }
+    ui.notify(
+      `审查完成：${review.summary}`,
+      review.score >= 80 ? 'success' : 'info',
+      5000,
+    )
+  } catch (err) {
+    if (current.signal.aborted) return
+    reviewError.value = userMessageForError(err)
+    const running = reviewSteps.value.find((step) => step.status === 'running')
+    if (running) running.status = 'failed'
+  } finally {
+    if (controller.value === current) {
+      controller.value = null
+      reviewBusy.value = false
+    }
+  }
+}
+
+function applyReviewRepair() {
+  const review = reviewResult.value
+  if (!result.value || !review || review.recommendedAction !== 'redraw' || !review.targetPart) {
+    return
+  }
+  if (!maskEdit.value) {
+    ui.notify(
+      '当前服务商不支持严格蒙版重绘，建议重新生成底图，或换用 OpenAI gpt-image-1。',
+      'error',
+      7000,
+    )
+    return
+  }
+  selectedPart.value = review.targetPart
+  redrawInstruction.value =
+    review.repairInstruction ||
+    defaultPartInstruction(specForRecord(result.value.record), review.targetPart)
+  void redrawSelected()
+}
+
+watch(result, () => {
+  reviewResult.value = null
+  reviewError.value = ''
+  reviewSteps.value = []
+})
+
+watch([reviewResult, result], () => {
+  if (reviewPreviewUrl.value) URL.revokeObjectURL(reviewPreviewUrl.value)
+  reviewPreviewUrl.value = null
+  const record = result.value?.record
+  const target = reviewResult.value?.targetPart
+  if (!record || !target) return
+  const info = partSpec(target)
+  const layerId = info.layers.map((entry) => entry.id).find((id) => record.layers[id])
+  const blob = layerId ? record.layers[layerId] : null
+  if (blob) reviewPreviewUrl.value = URL.createObjectURL(blob)
+})
 
 function goPersona() {
   if (!result.value) return
@@ -411,6 +752,7 @@ onBeforeUnmount(() => {
   controller.value?.abort()
   speech.stop()
   cancelAnimationFrame(mouthFrame)
+  if (reviewPreviewUrl.value) URL.revokeObjectURL(reviewPreviewUrl.value)
 })
 </script>
 
@@ -561,6 +903,16 @@ onBeforeUnmount(() => {
             </button>
             <pre v-if="showPrompt" class="prompt-preview">{{ promptPreview }}</pre>
 
+            <label class="refine-toggle" :class="{ 'is-disabled': !imageReady || !maskEdit }">
+              <input v-model="autoRefine" type="checkbox" :disabled="!imageReady || !maskEdit" />
+              <span>
+                <strong>生成后自动分部精修（实验）</strong>
+                <span class="av-muted">
+                  仅支持严格蒙版重绘的服务商（如 OpenAI gpt-image-1）；参考图服务商暂不开放。身体 → 头部 → 头发，额外 3 次调用。
+                </span>
+              </span>
+            </label>
+
             <div class="panel-actions">
               <BaseButton size="sm" @click="step = 1"><ArrowLeft :size="14" /> 上一步</BaseButton>
               <BaseButton
@@ -573,8 +925,8 @@ onBeforeUnmount(() => {
               </BaseButton>
             </div>
             <p class="cost-note">
-              <HelpDot>生成会调用一次生图模型；多模态分析只有在绑定了智能体模型时才会调用。</HelpDot>
-              本次预计 1 次生图调用{{ agentReady ? ' + 1 次多模态分析' : '' }}。费用由你的服务商账户结算。
+              <HelpDot>生成会调用一次生图模型；自动分部精修会再调用三次；多模态分析只有在绑定了智能体模型时才会调用。</HelpDot>
+              本次预计 {{ autoRefine && maskEdit ? 4 : 1 }} 次生图调用{{ autoRefine && maskEdit ? '（1 次底图 + 3 次部位编辑）' : '' }}{{ agentReady ? ' + 1 次多模态分析' : '' }}。费用由你的服务商账户结算。
             </p>
           </template>
 
@@ -632,7 +984,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="summary-item">
                   <span class="summary-label">多模态分析</span>
-                  <strong>{{ result.analysis ? `${Math.round(result.analysis.qa.overallScore * 100)} 分` : '未启用' }}</strong>
+                  <strong>{{ result.analysis && !analysisStale ? `${Math.round(result.analysis.qa.overallScore * 100)} 分` : analysisStale ? '重绘后未重新分析' : '未启用' }}</strong>
                 </div>
               </div>
 
@@ -652,11 +1004,163 @@ onBeforeUnmount(() => {
                 </ul>
               </div>
 
-              <div class="layer-chips">
-                <span v-for="(layer, id) in result.record.manifest.layers" :key="id" class="av-pill">
-                  {{ layer?.nameZh ?? id }}
-                </span>
+              <div class="review-panel">
+                <div class="review-head">
+                  <div>
+                    <p class="review-title">智能体审查</p>
+                    <p class="review-sub">
+                      多模态模型检查当前角色，问题定位到具体部位；审查只读，不会自动改图。
+                    </p>
+                  </div>
+                  <BaseButton
+                    size="sm"
+                    :loading="reviewBusy"
+                    :disabled="!agentReady || reviewBusy"
+                    @click="startReview"
+                  >
+                    {{ reviewResult ? '重新审查' : '开始审查' }}
+                  </BaseButton>
+                </div>
+                <p v-if="!agentReady" class="review-note">
+                  先在服务商设置里绑定一个支持看图的智能体模型。
+                </p>
+                <p v-else class="review-note">本次 1 次多模态调用；不会自动生图。</p>
+
+                <div v-if="reviewSteps.length" class="review-steps">
+                  <div
+                    v-for="step in reviewSteps"
+                    :key="step.id"
+                    class="review-step"
+                    :class="`is-${step.status}`"
+                  >
+                    <span class="review-dot" />
+                    <span>{{ step.label }}</span>
+                    <span class="review-step-detail">{{ step.detail }}</span>
+                  </div>
+                </div>
+
+                <p v-if="reviewError" class="review-error">{{ reviewError }}</p>
+
+                <div v-if="reviewResult" class="review-result">
+                  <div class="review-score">
+                    <strong>{{ reviewResult.score }}</strong><span>/100</span>
+                    <p>{{ reviewResult.summary }}</p>
+                  </div>
+                  <ul v-if="reviewResult.issues.length" class="review-issues">
+                    <li
+                      v-for="(issue, index) in reviewResult.issues"
+                      :key="index"
+                      :class="`is-${issue.severity}`"
+                    >
+                      <span class="review-sev">{{ issue.severity }}</span>
+                      <span class="review-part">{{ reviewPartLabel(issue.part) }}</span>
+                      <span class="review-msg">{{ issue.message }}</span>
+                    </li>
+                  </ul>
+                  <div v-if="reviewPreviewUrl" class="review-layer">
+                    <img :src="reviewPreviewUrl" alt="" />
+                    <span>
+                      定位图层：{{ reviewResult.targetPart ? partLabelZh(reviewResult.targetPart) : '整体' }}
+                    </span>
+                  </div>
+                  <div class="review-actions">
+                    <template v-if="reviewResult.recommendedAction === 'redraw'">
+                      <BaseButton
+                        size="sm"
+                        variant="primary"
+                        :disabled="!maskEdit || reviewBusy"
+                        @click="applyReviewRepair"
+                      >
+                        按建议重绘 {{ reviewResult.targetPart ? partLabelZh(reviewResult.targetPart) : '' }}
+                      </BaseButton>
+                      <span v-if="!maskEdit" class="av-muted">
+                        当前服务商不支持严格蒙版重绘，已禁用自动修复；建议重新生成底图。
+                      </span>
+                    </template>
+                    <template v-else-if="reviewResult.recommendedAction === 'regenerate'">
+                      <BaseButton size="sm" variant="primary" :disabled="reviewBusy" @click="regenerate">
+                        重新生成底图
+                      </BaseButton>
+                      <span class="av-muted">
+                        {{ reviewResult.reason || '底图或分层存在系统性问题。' }}
+                      </span>
+                    </template>
+                    <span v-else class="av-muted">审查通过，可以继续设置人设。</span>
+                  </div>
+                </div>
               </div>
+
+              <div v-if="redrawParts.length && maskEdit" class="layer-chips">
+                <button
+                  v-for="part in redrawParts"
+                  :key="part.id"
+                  type="button"
+                  class="av-pill layer-chip"
+                  :class="{
+                    'is-ok': selectedPart === part.id,
+                    'is-warn': refineStatus[part.id] === 'failed',
+                    'is-review': reviewResult?.targetPart === part.id,
+                  }"
+                  @click="selectPart(part.id)"
+                >
+                  {{ part.labelZh }}
+                  <span v-if="refineStatus[part.id] === 'done'" class="chip-mark">✓</span>
+                  <span v-else-if="refineStatus[part.id] === 'failed'" class="chip-mark">!</span>
+                  <span v-else-if="refineStatus[part.id] === 'skipped'" class="chip-mark">–</span>
+                </button>
+              </div>
+
+              <div v-if="selectedPart && maskEdit" class="redraw-panel">
+                <div class="redraw-head">
+                  <div>
+                    <p class="redraw-title">重绘 {{ partLabelZh(selectedPart) }}</p>
+                    <p class="redraw-sub">蒙版重绘：只改选中的部位。</p>
+                  </div>
+                  <span class="av-pill is-ok">蒙版重绘</span>
+                </div>
+                <textarea
+                  v-model="redrawInstruction"
+                  class="av-textarea"
+                  rows="3"
+                  placeholder="只描述这个部位要改什么；用途和隔离约束会自动加上"
+                />
+                <p class="redraw-hint">
+                  上面的文字只是部位描述；实际发送时会自动加上「2D 数字人分层资产、只输出该部位、不要脸/身体/背景」等约束。
+                </p>
+                <details class="redraw-prompt">
+                  <summary>查看模型实际收到的完整提示词</summary>
+                  <pre>{{ redrawPromptPreview }}</pre>
+                </details>
+                <div class="redraw-actions">
+                  <BaseButton
+                    size="sm"
+                    variant="primary"
+                    :loading="redrawBusy"
+                    :disabled="redrawBusy"
+                    @click="redrawSelected"
+                  >
+                    重绘此部位
+                  </BaseButton>
+                  <BaseButton v-if="undoStack.length" size="sm" :disabled="redrawBusy" @click="undoRedraw">
+                    撤销上一次
+                  </BaseButton>
+                  <BaseButton v-if="redrawBusy" size="sm" variant="danger" @click="cancelRedraw">
+                    取消
+                  </BaseButton>
+                  <span class="av-muted">本次 1 次生图调用</span>
+                </div>
+                <div v-if="redrawProgress" class="redraw-progress">
+                  <span>{{ redrawProgress.label }}</span>
+                  <span class="redraw-track">
+                    <span :style="{ width: `${Math.round((redrawProgress.progress ?? 0.05) * 100)}%` }" />
+                  </span>
+                </div>
+                <p v-if="redrawError" class="redraw-error">{{ redrawError }}</p>
+              </div>
+
+              <p v-if="redrawParts.length && !maskEdit" class="redraw-disabled">
+                当前服务商只支持参考图重绘，局部重绘会破坏图层，已暂时禁用。请换用支持严格蒙版的服务商（如 OpenAI gpt-image-1）。
+              </p>
 
               <div class="panel-actions">
                 <BaseButton size="sm" @click="regenerate">重新生成</BaseButton>
@@ -760,7 +1264,7 @@ onBeforeUnmount(() => {
             <AvatarStage
               v-if="result"
               ref="stageRef"
-              :key="result.record.id"
+              :key="`${result.record.id}-${stageVersion}`"
               :manifest="result.record.manifest"
               :rig="result.record.rig"
               :layers="result.record.layers"
@@ -1187,6 +1691,39 @@ onBeforeUnmount(() => {
   line-height: 1.6;
 }
 
+.refine-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--av-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+}
+
+.refine-toggle input {
+  margin-top: 3px;
+  accent-color: var(--av-accent);
+}
+
+.refine-toggle strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 12px;
+}
+
+.refine-toggle .av-muted {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.refine-toggle.is-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .progress-panel {
   padding: 18px;
   border-radius: 14px;
@@ -1315,6 +1852,345 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 14px;
+}
+
+.layer-chip {
+  border: 1px solid var(--av-border);
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.layer-chip:hover {
+  border-color: var(--av-accent);
+  color: var(--av-accent);
+}
+
+.layer-chip.is-ok {
+  border-color: var(--av-accent);
+  color: var(--av-accent);
+  background: var(--av-accent-soft);
+}
+
+.layer-chip.is-warn {
+  border-color: var(--av-danger);
+  color: var(--av-danger);
+}
+
+.chip-mark {
+  margin-left: 4px;
+  font-size: 10px;
+}
+
+.redraw-panel {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--av-border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.redraw-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.redraw-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.redraw-sub {
+  margin-top: 3px;
+  color: var(--av-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.redraw-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.redraw-prompt {
+  margin-top: 8px;
+  color: var(--av-muted);
+  font-size: 11px;
+}
+
+.redraw-hint {
+  margin-top: 8px;
+  color: var(--av-faint);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.redraw-prompt summary {
+  cursor: pointer;
+}
+
+.redraw-prompt pre {
+  margin: 8px 0 0;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--av-border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--av-text-soft);
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.redraw-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--av-muted);
+  font-size: 11px;
+}
+
+.redraw-track {
+  position: relative;
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.redraw-track span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--av-accent);
+  transition: width 0.2s ease;
+}
+
+.redraw-error {
+  margin-top: 8px;
+  color: var(--av-danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.redraw-disabled {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--av-border);
+  border-radius: 10px;
+  color: var(--av-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.review-panel {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--av-border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.review-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.review-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.review-sub {
+  margin-top: 3px;
+  color: var(--av-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.review-note {
+  margin-top: 8px;
+  color: var(--av-faint);
+  font-size: 10px;
+}
+
+.review-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.review-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--av-muted);
+  font-size: 11px;
+}
+
+.review-step.is-running {
+  color: var(--av-accent);
+}
+
+.review-step.is-done {
+  color: var(--av-text-soft);
+}
+
+.review-step.is-failed {
+  color: var(--av-danger);
+}
+
+.review-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.45;
+}
+
+.review-step.is-running .review-dot {
+  opacity: 1;
+  box-shadow: 0 0 0 4px var(--av-accent-soft);
+}
+
+.review-step.is-done .review-dot {
+  opacity: 1;
+  background: var(--av-accent);
+}
+
+.review-step.is-failed .review-dot {
+  opacity: 1;
+  background: var(--av-danger);
+}
+
+.review-step-detail {
+  margin-left: auto;
+  color: var(--av-faint);
+  font-size: 10px;
+  text-align: right;
+}
+
+.review-result {
+  margin-top: 12px;
+}
+
+.review-score {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.review-score strong {
+  font-family: var(--av-font-serif);
+  font-size: 24px;
+}
+
+.review-score span {
+  color: var(--av-faint);
+  font-size: 11px;
+}
+
+.review-score p {
+  flex: 1 1 100%;
+  margin-top: 2px;
+  color: var(--av-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.review-issues {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.review-issues li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.review-sev {
+  flex-shrink: 0;
+  width: 30px;
+  color: var(--av-faint);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.review-issues li.is-block .review-sev {
+  color: var(--av-danger);
+}
+
+.review-issues li.is-warn .review-sev {
+  color: var(--av-accent);
+}
+
+.review-part {
+  flex-shrink: 0;
+  color: var(--av-accent);
+}
+
+.review-msg {
+  color: var(--av-text-soft);
+}
+
+.review-layer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.review-layer img {
+  width: 84px;
+  height: 84px;
+  object-fit: contain;
+  border: 1px solid var(--av-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.review-layer span {
+  color: var(--av-faint);
+  font-size: 10px;
+}
+
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.review-error {
+  margin-top: 10px;
+  color: var(--av-danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.layer-chip.is-review {
+  border-color: var(--av-accent);
+  box-shadow: 0 0 0 2px var(--av-accent-soft);
 }
 
 .voice-section {

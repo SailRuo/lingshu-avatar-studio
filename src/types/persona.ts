@@ -29,6 +29,8 @@ export interface Persona {
     voiceId?: string
     speed: number
     visemeMode: 'envelope' | 'approx'
+    /** One-time migration marker: old builds defaulted to envelope. */
+    visemeModeMigrated?: boolean
   }
   memory: {
     enabled: boolean

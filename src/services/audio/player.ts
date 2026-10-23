@@ -24,6 +24,47 @@ export async function ensureAudioUnlocked(): Promise<AudioContext> {
   return ctx
 }
 
+let unlockInstalled = false
+
+/**
+ * Unlocks audio on the first user gesture.
+ *
+ * WebKit refuses to resume an AudioContext outside a gesture, and speech is
+ * only played once synthesis returns, seconds after the click that started it.
+ * By then the gesture is gone and resume() silently leaves the context
+ * suspended: the audio graph is built, the source starts, and nothing is
+ * heard. Resuming here, while the gesture is still live, is what makes later
+ * playback audible.
+ */
+export function installAudioUnlock(): void {
+  if (unlockInstalled || typeof window === 'undefined') return
+  unlockInstalled = true
+  const events: Array<keyof WindowEventMap> = ['pointerdown', 'keydown', 'touchstart']
+  const unlock = () => {
+    const ctx = getAudioContext()
+    // Keep the listeners until the context is actually running: a single
+    // attempt can be ignored before the page has settled, and removing them
+    // then leaves audio silently muted for the rest of the session.
+    void (async () => {
+      try {
+        if (ctx.state !== 'running') await ctx.resume()
+      } catch {
+        return
+      }
+      if (ctx.state !== 'running') return
+      // A one-sample silent buffer is what WebKit accepts as "played audio";
+      // some versions keep the context muted until it has produced something.
+      const buffer = ctx.createBuffer(1, 1, ctx.sampleRate)
+      const source = ctx.createBufferSource()
+      source.buffer = buffer
+      source.connect(ctx.destination)
+      source.start(0)
+      for (const event of events) window.removeEventListener(event, unlock, true)
+    })()
+  }
+  for (const event of events) window.addEventListener(event, unlock, true)
+}
+
 export class SpeechPlayer {
   private source: AudioBufferSourceNode | null = null
   private gain: GainNode | null = null
@@ -40,6 +81,19 @@ export class SpeechPlayer {
 
   async play(blob: Blob, options: { visemeMode?: VisemeMode } = {}): Promise<void> {
     const ctx = await ensureAudioUnlocked()
+    if (ctx.state !== 'running') {
+      // One more attempt outside the original gesture. If the context still
+      // refuses to run, saying nothing would look like a silent bug: nothing
+      // is heard and speak() never resolves. Say what happened instead.
+      try {
+        await ctx.resume()
+      } catch {
+        // fall through to the check below
+      }
+    }
+    if (ctx.state !== 'running') {
+      throw new Error('系统暂时不允许播放音频，请点击页面任意位置后重新发送。')
+    }
     const buffer = await ctx.decodeAudioData(await blob.arrayBuffer())
     this.stop()
     this.visemeMode = options.visemeMode ?? 'envelope'

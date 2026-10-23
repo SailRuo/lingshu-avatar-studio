@@ -58,3 +58,24 @@ export interface VisionAnalysis {
     proceed: boolean
   }
 }
+
+export type ReviewPart = 'body' | 'head' | 'hair' | 'eyeL' | 'eyeR' | 'mouth'
+export type ReviewAction = 'redraw' | 'regenerate' | 'none'
+
+export interface ReviewIssue {
+  severity: 'info' | 'warn' | 'block'
+  part: ReviewPart | 'none'
+  message: string
+  suggestion: ReviewAction
+  instruction?: string
+}
+
+export interface CharacterReview {
+  score: number
+  summary: string
+  issues: ReviewIssue[]
+  recommendedAction: ReviewAction
+  targetPart?: ReviewPart
+  repairInstruction?: string
+  reason?: string
+}

@@ -81,6 +81,21 @@ export function maskFromCanvas(canvas: HTMLCanvasElement, value = 255): Mask {
   return mask
 }
 
+/**
+ * Keeps the alpha channel instead of thresholding it. Layer PNGs already have
+ * a feathered edge, and the redraw mask must preserve that softness.
+ */
+export function maskFromCanvasAlpha(canvas: HTMLCanvasElement): Mask {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  const mask = createMask(canvas.width, canvas.height)
+  if (!ctx) return mask
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  for (let i = 0; i < mask.data.length; i += 1) {
+    mask.data[i] = image[i * 4 + 3]
+  }
+  return mask
+}
+
 export function resizeMaskNearest(mask: Mask, width: number, height: number): Mask {
   if (mask.width === width && mask.height === height) return mask
   const out = createMask(width, height)
@@ -156,6 +171,46 @@ export function dilateMask(mask: Mask, radiusPx: number): Mask {
   return out
 }
 
+/**
+ * Shrinks a mask by roughly `radiusPx`.
+ *
+ * The cavity behind the lips is clipped to the mouth mask, but the mouth layer
+ * is feathered, so a cavity with the same extent bleeds through that feathered
+ * edge as a dark ring around the lips. Eroding the cavity keeps it strictly
+ * inside the opaque part of the lips.
+ */
+export function erodeMask(mask: Mask, radiusPx: number): Mask {
+  if (radiusPx <= 0) return mask
+  const canvas = createCanvas(mask.width, mask.height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return mask
+  const image = ctx.createImageData(mask.width, mask.height)
+  for (let i = 0; i < mask.data.length; i += 1) {
+    image.data[i * 4] = 255
+    image.data[i * 4 + 1] = 255
+    image.data[i * 4 + 2] = 255
+    image.data[i * 4 + 3] = mask.data[i]
+  }
+  ctx.putImageData(image, 0, 0)
+  const outCanvas = createCanvas(mask.width, mask.height)
+  const outCtx = outCanvas.getContext('2d')
+  if (!outCtx) return mask
+  try {
+    outCtx.filter = `blur(${radiusPx}px)`
+  } catch {
+    // Canvas filter is unsupported in some old WebViews; keep the original.
+  }
+  outCtx.drawImage(canvas, 0, 0)
+  const out = createMask(mask.width, mask.height)
+  const data = outCtx.getImageData(0, 0, mask.width, mask.height).data
+  for (let i = 0; i < out.data.length; i += 1) {
+    // Only pixels that stayed fully covered survive, which erodes the edge by
+    // about the blur radius.
+    out.data[i] = data[i * 4 + 3] > 240 ? 255 : 0
+  }
+  return out
+}
+
 export function maskBBox(mask: Mask, threshold = 32): MaskBox | null {
   let minX = mask.width
   let minY = mask.height
@@ -190,6 +245,19 @@ export function maskCoverage(mask: Mask, threshold = 128): number {
     if (mask.data[i] > threshold) count += 1
   }
   return count / (mask.width * mask.height)
+}
+
+/** How much of a tight bounding box is actually filled by the mask. */
+export function maskFillRatio(mask: Mask, bbox: Rect, threshold = 127): number {
+  const box = clampRect(bbox, mask.width, mask.height)
+  let count = 0
+  for (let y = box.y; y < box.y + box.h; y += 1) {
+    const row = y * mask.width
+    for (let x = box.x; x < box.x + box.w; x += 1) {
+      if (mask.data[row + x] > threshold) count += 1
+    }
+  }
+  return count / Math.max(1, box.w * box.h)
 }
 
 export function maskToCanvas(mask: Mask, bbox: Rect, featherPx = 0): HTMLCanvasElement {
@@ -338,6 +406,67 @@ export function bboxWithPadding(rect: Rect, padding: number, width: number, heig
     width,
     height,
   )
+}
+
+export function polygonArea(points: Point[]): number {
+  if (points.length < 3) return 0
+  let sum = 0
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i += 1) {
+    sum += points[j].x * points[i].y - points[i].x * points[j].y
+  }
+  return Math.abs(sum) / 2
+}
+
+export function isDegeneratePolygon(points: Point[], minArea = 1): boolean {
+  return points.length < 3 || polygonArea(points) < minArea
+}
+
+/**
+ * Drops 8-connected components with fewer than `minArea` pixels. Landmark
+ * polygons and low-resolution masks both leave tiny specks that would become
+ * visible stray hairs or eyelashes in the rendered layers.
+ */
+export function removeSmallComponents(mask: Mask, minArea: number, threshold = 127): Mask {
+  if (minArea <= 1) return mask
+  const { width, height } = mask
+  const data = new Uint8Array(mask.data)
+  const visited = new Uint8Array(width * height)
+  const stack = new Int32Array(width * height)
+  const component = new Int32Array(width * height)
+
+  for (let start = 0; start < data.length; start += 1) {
+    if (visited[start] || data[start] <= threshold) continue
+    let top = 1
+    let count = 0
+    stack[0] = start
+    visited[start] = 1
+    while (top > 0) {
+      top -= 1
+      const index = stack[top]
+      component[count] = index
+      count += 1
+      const x = index % width
+      const y = (index - x) / width
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const ny = y + dy
+        if (ny < 0 || ny >= height) continue
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const nx = x + dx
+          if (nx < 0 || nx >= width) continue
+          const next = ny * width + nx
+          if (!visited[next] && data[next] > threshold) {
+            visited[next] = 1
+            stack[top] = next
+            top += 1
+          }
+        }
+      }
+    }
+    if (count < minArea) {
+      for (let i = 0; i < count; i += 1) data[component[i]] = 0
+    }
+  }
+  return { width, height, data }
 }
 
 export { clamp }

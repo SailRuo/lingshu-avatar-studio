@@ -114,6 +114,26 @@ describe('mouth shape analysis', () => {
     expect(smoother.push(REST_SHAPE).openness).toBe(0)
   })
 
+  it('eases lip width, roundness and teeth instead of snapping', () => {
+    const smoother = new MouthShapeSmoother()
+    const round = {
+      viseme: 'round' as const,
+      openness: 0.5,
+      width: -1,
+      roundness: 1,
+      teeth: 0,
+      level: 0.5,
+    }
+    const first = smoother.push(round)
+    expect(first.roundness).toBeGreaterThan(0)
+    expect(first.roundness).toBeLessThan(1)
+    expect(first.width).toBeGreaterThan(-1)
+    let current = first
+    for (let index = 0; index < 24; index += 1) current = smoother.push(round)
+    expect(current.roundness).toBeGreaterThan(0.9)
+    expect(current.width).toBeLessThan(-0.8)
+  })
+
   it('separates the vowels by their formants', () => {
     // /i/ spreads the lips into a narrow slit.
     expect(shapeOf(vowel([270, 2290, 3010], 0.3)).viseme).toBe('narrow')

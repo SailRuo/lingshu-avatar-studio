@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import {
+  Cpu,
   Database,
   ExternalLink,
   FileArchive,
@@ -17,6 +18,13 @@ import { useProviderStore } from '../stores/useProviderStore'
 import { useCharacterStore } from '../stores/useCharacterStore'
 import { useUiStore } from '../stores/useUiStore'
 import { importCharacterZip } from '../services/pack/importZip'
+import { RMBG_1_4, modelFileError } from '../services/cv/matting/spec'
+import {
+  deleteModel,
+  getModelInfo,
+  saveModel,
+  type StoredModelInfo,
+} from '../services/storage/modelRepo'
 import BaseButton from '../components/ui/BaseButton.vue'
 import Modal from '../components/ui/Modal.vue'
 
@@ -31,6 +39,9 @@ const showClearKeys = ref(false)
 const showClearChats = ref(false)
 const importing = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+const mattingInfo = ref<StoredModelInfo | null>(null)
+const mattingImporting = ref(false)
+const mattingInput = ref<HTMLInputElement | null>(null)
 
 const chatStores = computed(() => {
   if (typeof localStorage === 'undefined') return 0
@@ -94,8 +105,41 @@ async function onImport(event: Event) {
   }
 }
 
+async function onImportMatting(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  const error = modelFileError(file, RMBG_1_4)
+  if (error) {
+    ui.notify(error, 'error', 6000)
+    return
+  }
+  mattingImporting.value = true
+  try {
+    mattingInfo.value = await saveModel(RMBG_1_4.id, file)
+    ui.notify('抠图模型已导入，新建角色时生效', 'success', 5000)
+  } catch (err) {
+    ui.notify(err instanceof Error ? err.message : '模型导入失败', 'error', 6000)
+  } finally {
+    mattingImporting.value = false
+  }
+}
+
+async function removeMatting() {
+  await deleteModel(RMBG_1_4.id)
+  mattingInfo.value = null
+  ui.notify('抠图模型已移除', 'info')
+}
+
 onMounted(async () => {
-  await Promise.all([providers.refreshKeyPresence(), characters.load()])
+  await Promise.all([
+    providers.refreshKeyPresence(),
+    characters.load(),
+    getModelInfo(RMBG_1_4.id).then((info) => {
+      mattingInfo.value = info
+    }),
+  ])
   await loadStorage()
 })
 </script>
@@ -190,6 +234,37 @@ onMounted(async () => {
         </p>
       </section>
 
+      <section class="av-card panel">
+        <div class="panel-head">
+          <span class="panel-icon"><Cpu :size="17" /></span>
+          <div>
+            <h2 class="panel-title">抠图模型</h2>
+            <p class="panel-desc">可选。导入 RMBG-1.4 后，新建角色时会用它抠前景；未导入时继续使用内置分割。</p>
+          </div>
+        </div>
+        <div class="key-summary">
+          <span class="av-pill" :class="{ 'is-ok': mattingInfo }">
+            {{ mattingInfo ? 'RMBG-1.4 已导入' : '未导入' }}
+          </span>
+          <span class="av-muted">{{ mattingInfo ? formatBytes(mattingInfo.size) : '约 176 MB' }}</span>
+        </div>
+        <div class="panel-actions">
+          <BaseButton size="sm" :loading="mattingImporting" @click="mattingInput?.click()">
+            <template #icon><Upload :size="14" /></template>
+            导入 ONNX
+          </BaseButton>
+          <BaseButton v-if="mattingInfo" size="sm" variant="danger" @click="removeMatting">
+            <template #icon><Trash2 :size="13" /></template>
+            移除
+          </BaseButton>
+        </div>
+        <p class="panel-note">
+          权重由 BRIA 提供，仅限非商用；商用请另行获取授权。本应用不内置权重，请自行
+          <a :href="RMBG_1_4.sourceUrl" target="_blank" rel="noreferrer">下载 model.onnx</a>
+          后导入。模型只用于创建阶段，播放角色包不依赖它。
+        </p>
+      </section>
+
       <section class="av-card panel about-panel">
         <div class="panel-head">
           <span class="panel-icon"><ShieldCheck :size="17" /></span>
@@ -208,6 +283,7 @@ onMounted(async () => {
     </div>
 
     <input ref="fileInput" type="file" accept=".zip,application/zip" class="hidden-input" @change="onImport" />
+    <input ref="mattingInput" type="file" accept=".onnx" class="hidden-input" @change="onImportMatting" />
 
     <Modal :open="showClearKeys" title="清除所有 Key" width="440px" @close="showClearKeys = false">
       <p class="modal-copy">会删除本机保存的所有服务商 Key，角色包不会删除。清除后，聊天、语音和生图都会停止工作，直到重新填写。</p>

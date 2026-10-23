@@ -41,10 +41,11 @@ const traitsText = computed({
 
 /** Which mouth model drives the stage while the character speaks. */
 const visemeMode = computed({
-  get: () => record.value?.persona.voice.visemeMode ?? 'envelope',
+  get: () => record.value?.persona.voice.visemeMode ?? 'approx',
   set: (value: string) => {
     if (!record.value) return
     record.value.persona.voice.visemeMode = value === 'approx' ? 'approx' : 'envelope'
+    record.value.persona.voice.visemeModeMigrated = true
   },
 })
 const valuesText = computed({

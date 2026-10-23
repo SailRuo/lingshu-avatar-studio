@@ -26,6 +26,7 @@ export type LayerId =
   | 'eyeL'
   | 'eyeR'
   | 'mouth'
+  | 'mouthCavity'
   | 'blush'
   | 'hairSide'
   | 'hairFront'
@@ -82,6 +83,8 @@ export interface CharacterManifest {
     prompt?: string
     seed?: number
     variantMode?: 'mask-edit' | 'instruction-edit' | 'warp' | 'none'
+    /** Snapshot of the brief that produced the base image, reused by part redraws. */
+    spec?: CharacterSpec
   }
   files: {
     rig: string

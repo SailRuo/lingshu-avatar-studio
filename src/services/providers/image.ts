@@ -48,28 +48,7 @@ interface ImageApiResponse {
   error?: unknown
 }
 
-export function aspectToSize(
-  aspect: '2:3' | '1:1' | '3:4',
-  provider?: ProviderConfig,
-): string {
-  if (provider?.kind === 'sensenova') {
-    if (aspect === '1:1') return '2048x2048'
-    if (aspect === '3:4') return '1760x2368'
-    return '1664x2496'
-  }
-  if (provider?.kind === 'ark') {
-    if (aspect === '1:1') return '2048x2048'
-    if (aspect === '3:4') return '1728x2304'
-    return '1536x2304'
-  }
-  if (provider?.kind === 'siliconflow') {
-    if (aspect === '1:1') return '1024x1024'
-    return '960x1280'
-  }
-  if (aspect === '1:1') return '1024x1024'
-  if (aspect === '3:4') return '768x1024'
-  return '1024x1536'
-}
+export { aspectToSize, editSizeForProvider } from './imageSizes'
 
 function imageEndpoint(provider: ProviderConfig, edit: boolean): string {
   const path = edit ? '/images/edits' : '/images/generations'
@@ -317,6 +296,7 @@ async function editViaReference(options: EditImageOptions): Promise<ImageApiResp
 }
 
 export async function editImage(options: EditImageOptions): Promise<GeneratedImage> {
+  if (!options.provider.baseUrl) throw new ProviderError('bad_request', '服务商 Base URL 为空。')
   if (providerNeedsUserProxy(options.provider)) {
     throw new ProviderError(
       'cors',

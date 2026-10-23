@@ -12,6 +12,11 @@ interface StoredSetting {
   value: unknown
 }
 
+interface StoredModel {
+  id: string
+  blob: Blob
+}
+
 interface AvatarDB extends DBSchema {
   characters: {
     key: string
@@ -26,10 +31,16 @@ interface AvatarDB extends DBSchema {
     key: string
     value: StoredSetting
   }
+  models: {
+    key: string
+    value: StoredModel
+  }
 }
 
 const DB_NAME = 'lingshu-avatar-studio'
-const DB_VERSION = 1
+// v2 added the optional local model store. The upgrade callback only creates
+// the new store, so existing characters and keys are left untouched.
+const DB_VERSION = 2
 
 let dbPromise: Promise<IDBPDatabase<AvatarDB>> | null = null
 
@@ -46,6 +57,9 @@ export function getDb(): Promise<IDBPDatabase<AvatarDB>> {
         }
         if (!db.objectStoreNames.contains('settings')) {
           db.createObjectStore('settings', { keyPath: 'key' })
+        }
+        if (!db.objectStoreNames.contains('models')) {
+          db.createObjectStore('models', { keyPath: 'id' })
         }
       },
     })
